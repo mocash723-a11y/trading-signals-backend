@@ -1,4 +1,4 @@
- '''
+
 from datetime import datetime
 
 def ema(prices, period):
@@ -208,4 +208,3 @@ def session_quality(symbol):
     else:
         return {"quality": "moderate", "multiplier": 0.90,
                 "note": "Tokyo session — moderate accuracy"}
-'''
