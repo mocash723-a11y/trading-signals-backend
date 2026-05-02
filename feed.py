@@ -1,4 +1,4 @@
- '''
+ 
 import asyncio
 import json
 import websockets
@@ -120,4 +120,3 @@ def is_forex_session():
         "dead_zone": hour >= 21 or hour < 6,
         "current_hour_utc": hour
     }
-'''
