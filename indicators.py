@@ -1,4 +1,3 @@
-
 from datetime import datetime
 
 def ema(prices, period):
@@ -115,11 +114,6 @@ def tick_momentum(prices, lookback=10):
     }
 
 def multi_timeframe_confirm(prices, direction):
-    """
-    Checks if RSI agrees across 3 different sample sizes.
-    All 3 agreeing adds up to +20 confidence points.
-    This is the single biggest free accuracy improvement.
-    """
     if len(prices) < 200:
         return {"confirmed": False, "bonus": 0, "agreement": "0/3"}
     confirmations = 0
@@ -143,11 +137,6 @@ def multi_timeframe_confirm(prices, direction):
     }
 
 def detect_candle_patterns(prices):
-    """
-    Detects pin bars and engulfing candles from tick data.
-    Pin bar = price rejection (reversal signal) +8 confidence.
-    Engulfing = strong momentum reversal +10 confidence.
-    """
     if len(prices) < 30:
         return {"pattern": "none", "bias": "neutral", "bonus": 0}
     candles = []
@@ -184,27 +173,22 @@ def detect_candle_patterns(prices):
     return {"pattern": "none", "bias": "neutral", "bonus": 0}
 
 def session_quality(symbol):
-    """
-    Returns accuracy rating based on current trading session.
-    Forex is most accurate during London + NY overlap (12pm-4pm UTC).
-    Bitcoin trades 24/7 so always rated good.
-    """
     hour = datetime.utcnow().hour
     if symbol.startswith("cry"):
         return {"quality": "good", "multiplier": 1.0, "note": "24/7 crypto market"}
     overlap = 12 <= hour < 16
     london = 7 <= hour < 16
-    new_york = 12 <= hour < 21
-    dead = hour >= 21 or hour < 6
+    new_york = 12 <= hour < 20
+    dead = hour >= 20 or hour < 6
     if overlap:
         return {"quality": "excellent", "multiplier": 1.15,
-                "note": "London + NY overlap — peak accuracy window"}
+                "note": "London + NY overlap — peak accuracy"}
     elif london or new_york:
         return {"quality": "good", "multiplier": 1.0,
                 "note": "Active session — good accuracy"}
     elif dead:
         return {"quality": "poor", "multiplier": 0.80,
-                "note": "Low liquidity — consider waiting for London open"}
+                "note": "Low liquidity — signals paused"}
     else:
         return {"quality": "moderate", "multiplier": 0.90,
                 "note": "Tokyo session — moderate accuracy"}
