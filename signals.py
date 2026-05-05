@@ -1,20 +1,34 @@
-
 from datetime import datetime, timezone
-from feed import get_prices, get_all_symbols
+from feed import (
+    get_prices, get_all_symbols, get_signal_validity,
+    get_pair_min_confidence, BTC_EXCLUDED_TIMEFRAMES, is_forex_session
+)
 from indicators import (
     rsi, ema, macd, bollinger_bands, stochastic, tick_momentum,
     multi_timeframe_confirm, detect_candle_patterns, session_quality
 )
+from feedback import get_adaptive_threshold
 
-MIN_CONFIDENCE = 62
-VIP_CONFIDENCE = 78
 MIN_TICKS = 60
-
 current_signals = {}
 
+def _get_min_confidence(symbol, timeframe):
+    """
+    Returns the effective minimum confidence for a pair/timeframe.
+    Uses the HIGHER of the pair's default threshold or the adaptive
+    threshold learned from user feedback.
+    """
+    pair_default = get_pair_min_confidence(symbol)
+    adaptive = get_adaptive_threshold(symbol, timeframe)
+    return max(pair_default, adaptive)
+
 def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, reason, extras=None):
-    if confidence < MIN_CONFIDENCE:
+    min_conf = _get_min_confidence(symbol, timeframe)
+    if confidence < min_conf:
         return None
+
+    validity_seconds = get_signal_validity(timeframe)
+
     signal = {
         "id": f"{symbol}_{timeframe}_{int(datetime.now().timestamp())}",
         "asset": name,
@@ -23,9 +37,13 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
         "timeframe": timeframe,
         "entry_price": round(entry_price, 5),
         "confidence": min(int(confidence), 93),
-        "is_vip": confidence >= VIP_CONFIDENCE,
+        "is_vip": confidence >= 78,
         "reason": reason,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "valid_for_seconds": validity_seconds,
+        "valid_until": datetime.fromtimestamp(
+            datetime.now().timestamp() + validity_seconds, tz=timezone.utc
+        ).isoformat(),
     }
     if extras:
         signal.update(extras)
@@ -44,12 +62,23 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons):
     session = session_quality(symbol)
     confidence *= session["multiplier"]
     if session["quality"] == "excellent":
-        reasons.append("Peak session (London+NY overlap)")
+        reasons.append("Peak session")
     elif session["quality"] == "poor":
-        reasons.append("Low liquidity — reduce position size")
+        reasons.append("Low liquidity")
     return confidence
 
+def _session_allows_signal(symbol):
+    """Block forex signals during dead zone (after 20:00 UTC)."""
+    if symbol.startswith("cry"):
+        return True  # Crypto always allowed
+    session = is_forex_session()
+    return not session["dead_zone"]
+
+# ── Timeframe strategies ──────────────────────────────────────────────────────
+
 def signal_5s(symbol, name, prices):
+    if symbol in ("cryBTCUSD",) or not _session_allows_signal(symbol):
+        return None
     if len(prices) < 20:
         return None
     momentum = tick_momentum(prices, lookback=15)
@@ -61,6 +90,10 @@ def signal_5s(symbol, name, prices):
     return _build_signal(symbol, name, direction, "5s", confidence, prices[-1], " | ".join(reasons))
 
 def signal_1min(symbol, name, prices):
+    if symbol in BTC_EXCLUDED_TIMEFRAMES or not _session_allows_signal(symbol):
+        return None
+    if symbol == "cryBTCUSD":
+        return None
     if len(prices) < 70:
         return None
     sample = prices[-70:]
@@ -85,6 +118,8 @@ def signal_1min(symbol, name, prices):
     return _build_signal(symbol, name, direction, "1min", confidence, prices[-1], " | ".join(reasons))
 
 def signal_3min(symbol, name, prices):
+    if symbol == "cryBTCUSD" or not _session_allows_signal(symbol):
+        return None
     if len(prices) < 160:
         return None
     sample = prices[-180:]
@@ -111,6 +146,8 @@ def signal_3min(symbol, name, prices):
     return None
 
 def signal_5min(symbol, name, prices):
+    if not _session_allows_signal(symbol) and not symbol.startswith("cry"):
+        return None
     if len(prices) < 260:
         return None
     sample = prices[-300:]
@@ -136,7 +173,12 @@ def signal_5min(symbol, name, prices):
         return _build_signal(symbol, name, "SELL", "5min", confidence, prices[-1], " | ".join(reasons))
     return None
 
-STRATEGY_MAP = {"5s": signal_5s, "1min": signal_1min, "3min": signal_3min, "5min": signal_5min}
+STRATEGY_MAP = {
+    "5s": signal_5s,
+    "1min": signal_1min,
+    "3min": signal_3min,
+    "5min": signal_5min
+}
 
 def generate_signals():
     for symbol, name in get_all_symbols().items():
@@ -172,17 +214,28 @@ def get_signal_for(symbol, timeframe):
 
 def get_recommendations():
     all_sigs = get_all_signals()
+    session = is_forex_session()
+
+    if session["dead_zone"]:
+        return {
+            "status": "low_liquidity",
+            "message": "Markets are in low liquidity hours (after 20:00 UTC). Signals are paused to protect accuracy. Come back during London session (7am UTC).",
+            "recommendations": []
+        }
+
     if not all_sigs:
         return {
             "status": "loading",
             "message": "Collecting price data... check back in 2 minutes.",
             "recommendations": []
         }
+
     top3 = all_sigs[:3]
     rank_labels = ["Best Trade Now", "Second Best", "Third Best"]
     recommendations = []
+
     for i, sig in enumerate(top3):
-        session = session_quality(sig["symbol"])
+        sess = session_quality(sig["symbol"])
         recommendations.append({
             "rank": i + 1,
             "rank_label": rank_labels[i],
@@ -193,13 +246,18 @@ def get_recommendations():
             "confidence": sig["confidence"],
             "entry_price": sig["entry_price"],
             "is_vip": sig["is_vip"],
-            "session_quality": session["quality"],
-            "session_note": session["note"],
-            "why": _explain(sig, session),
+            "valid_for_seconds": sig.get("valid_for_seconds", 60),
+            "valid_until": sig.get("valid_until"),
+            "session_quality": sess["quality"],
+            "session_note": sess["note"],
+            "why": _explain(sig, sess),
+            "reason": sig["reason"],
             "timestamp": sig["timestamp"],
         })
+
     return {
         "status": "ok",
+        "session": session["session_label"],
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "recommendations": recommendations
     }
@@ -208,10 +266,12 @@ def _explain(sig, session):
     direction_text = "BUY — price going UP" if sig["direction"] == "BUY" else "SELL — price going DOWN"
     tf_map = {"5s": "5 seconds", "1min": "1 minute", "3min": "3 minutes", "5min": "5 minutes"}
     strength = "Very strong" if sig["confidence"] >= 85 else "Strong" if sig["confidence"] >= 75 else "Moderate"
+    validity = sig.get("valid_for_seconds", 60)
     return (
         f"{strength} {direction_text} on {sig['asset']}. "
         f"Set expiry to {tf_map.get(sig['timeframe'], sig['timeframe'])}. "
         f"Confidence: {sig['confidence']}%. "
+        f"Valid for {validity} seconds — act quickly. "
         f"Market: {session['note']}. "
         f"Indicators: {sig['reason']}."
     )
