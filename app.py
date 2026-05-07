@@ -2,13 +2,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
+from typing import Optional
 import asyncio
 from feed import start_feed, get_latest_ticks, get_asset_groups
 from signals import (
     generate_signals, get_all_signals,
-    get_signal_for, get_recommendations
+    get_signal_for, get_recommendations, ml_model
 )
-from feedback import record_outcome, get_stats, get_pair_accuracy
+from feedback import record_outcome, get_stats, get_pair_accuracy, update_signal_outcome
+import joblib
+import os
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,11 +36,9 @@ async def signal_loop():
             print(f"Signal error: {e}")
         await asyncio.sleep(5)
 
-# ── Basic endpoints ───────────────────────────────────────────────────────────
-
 @app.get("/")
 def root():
-    return {"status": "Trading Signals API is running"}
+    return {"status": "Trading Signals API is running", "ml_loaded": ml_model is not None}
 
 @app.get("/health")
 def health():
@@ -76,20 +77,16 @@ def get_prices():
     return get_latest_ticks()
 
 # ── Feedback endpoints ────────────────────────────────────────────────────────
-
 class FeedbackPayload(BaseModel):
-    symbol: str        # e.g. "frxEURUSD"
-    timeframe: str     # e.g. "1min"
-    direction: str     # "BUY" or "SELL"
-    outcome: str       # "win" or "loss"
-    confidence: int    # confidence score at time of signal
+    symbol: str
+    timeframe: str
+    direction: str
+    outcome: str
+    confidence: int
+    signal_id: Optional[str] = None
 
 @app.post("/feedback")
 def submit_feedback(payload: FeedbackPayload):
-    """
-    Called by the app when user marks a trade as WIN or LOSS.
-    Stores the result and uses it to improve future signals.
-    """
     record_outcome(
         symbol=payload.symbol,
         timeframe=payload.timeframe,
@@ -97,6 +94,9 @@ def submit_feedback(payload: FeedbackPayload):
         outcome=payload.outcome,
         confidence=payload.confidence
     )
+    # If signal_id is provided, update the pending signal for ML
+    if payload.signal_id:
+        update_signal_outcome(payload.signal_id, payload.outcome)
     stats = get_pair_accuracy(payload.symbol, payload.timeframe)
     return {
         "status": "recorded",
@@ -106,12 +106,20 @@ def submit_feedback(payload: FeedbackPayload):
 
 @app.get("/stats")
 def get_all_stats():
-    """
-    Returns win/loss statistics for all pairs and timeframes.
-    Used by the app to show your personal accuracy dashboard.
-    """
     return get_stats()
 
 @app.get("/stats/{symbol}/{timeframe}")
 def get_pair_stats(symbol: str, timeframe: str):
     return get_pair_accuracy(symbol, timeframe)
+
+# ── Model management ─────────────────────────────────────────────────────────
+@app.post("/reload-model")
+def reload_model():
+    global ml_model
+    if os.path.exists("model.pkl"):
+        try:
+            ml_model = joblib.load("model.pkl")
+            return {"status": "model reloaded"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    return {"status": "model not found"}
