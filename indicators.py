@@ -1,5 +1,7 @@
 from datetime import datetime
+import math
 
+# ── Original helpers ──────────────────────────────────────────────────────
 def ema(prices, period):
     if len(prices) < period:
         return None
@@ -136,42 +138,6 @@ def multi_timeframe_confirm(prices, direction):
         "agreement": f"{confirmations}/3"
     }
 
-def detect_candle_patterns(prices):
-    if len(prices) < 30:
-        return {"pattern": "none", "bias": "neutral", "bonus": 0}
-    candles = []
-    for i in range(3):
-        start = -(30 - i * 10)
-        end = -(20 - i * 10) if (20 - i * 10) > 0 else None
-        chunk = prices[start:end]
-        if len(chunk) < 5:
-            continue
-        candles.append({
-            "open": chunk[0], "close": chunk[-1],
-            "high": max(chunk), "low": min(chunk),
-            "body": abs(chunk[-1] - chunk[0]),
-            "range": max(chunk) - min(chunk),
-            "bullish": chunk[-1] > chunk[0]
-        })
-    if len(candles) < 2:
-        return {"pattern": "none", "bias": "neutral", "bonus": 0}
-    prev, curr = candles[-2], candles[-1]
-    if curr["range"] > 0:
-        body_ratio = curr["body"] / curr["range"]
-        if body_ratio < 0.3:
-            upper_wick = curr["high"] - max(curr["open"], curr["close"])
-            lower_wick = min(curr["open"], curr["close"]) - curr["low"]
-            if lower_wick > upper_wick * 2:
-                return {"pattern": "Bullish Pin Bar", "bias": "BUY", "bonus": 8}
-            elif upper_wick > lower_wick * 2:
-                return {"pattern": "Bearish Pin Bar", "bias": "SELL", "bonus": 8}
-    if curr["body"] > prev["body"] * 1.5:
-        if curr["bullish"] and not prev["bullish"]:
-            return {"pattern": "Bullish Engulfing", "bias": "BUY", "bonus": 10}
-        elif not curr["bullish"] and prev["bullish"]:
-            return {"pattern": "Bearish Engulfing", "bias": "SELL", "bonus": 10}
-    return {"pattern": "none", "bias": "neutral", "bonus": 0}
-
 def session_quality(symbol):
     hour = datetime.utcnow().hour
     if symbol.startswith("cry"):
@@ -192,3 +158,116 @@ def session_quality(symbol):
     else:
         return {"quality": "moderate", "multiplier": 0.90,
                 "note": "Tokyo session — moderate accuracy"}
+
+# ── New indicators: ADX, ATR ──────────────────────────────────────────────
+def atr(highs, lows, closes, period=14):
+    if len(highs) < period + 1:
+        return None
+    tr = []
+    for i in range(1, len(highs)):
+        tr.append(max(highs[i] - lows[i],
+                      abs(highs[i] - closes[i-1]),
+                      abs(lows[i] - closes[i-1])))
+    if len(tr) < period:
+        return None
+    atr_val = sum(tr[:period]) / period
+    for i in range(period, len(tr)):
+        atr_val = (atr_val * (period - 1) + tr[i]) / period
+    return round(atr_val, 5)
+
+def adx(highs, lows, closes, period=14):
+    if len(highs) < period + 1:
+        return None
+    plus_dm = []
+    minus_dm = []
+    tr = []
+    for i in range(1, len(highs)):
+        up = highs[i] - highs[i-1]
+        down = lows[i-1] - lows[i]
+        if up > down and up > 0:
+            plus_dm.append(up)
+        else:
+            plus_dm.append(0)
+        if down > up and down > 0:
+            minus_dm.append(down)
+        else:
+            minus_dm.append(0)
+        tr_val = max(highs[i] - lows[i],
+                     abs(highs[i] - closes[i-1]),
+                     abs(lows[i] - closes[i-1]))
+        tr.append(tr_val)
+    if len(tr) < period:
+        return None
+    atr_val = sum(tr[:period]) / period
+    sum_pdm = sum(plus_dm[:period])
+    sum_mdm = sum(minus_dm[:period])
+    for i in range(period, len(tr)):
+        atr_val = (atr_val * (period - 1) + tr[i]) / period
+        sum_pdm = (sum_pdm * (period - 1) + plus_dm[i]) / period
+        sum_mdm = (sum_mdm * (period - 1) + minus_dm[i]) / period
+    if atr_val == 0:
+        return None
+    plus_di = (sum_pdm / atr_val) * 100
+    minus_di = (sum_mdm / atr_val) * 100
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    return {"adx": round(dx, 2), "plus_di": round(plus_di, 2), "minus_di": round(minus_di, 2)}
+
+# ── Real candle pattern detection (requires OHLC candles) ─────────────────
+def detect_candle_patterns_from_ohlc(candles):
+    if not candles or len(candles) < 2:
+        return {"pattern": "none", "bias": "neutral", "bonus": 0}
+    curr = candles[-1]
+    prev = candles[-2] if len(candles) >= 2 else None
+
+    body = abs(curr["close"] - curr["open"])
+    range_hl = curr["high"] - curr["low"]
+    if range_hl == 0:
+        return {"pattern": "none", "bias": "neutral", "bonus": 0}
+    body_ratio = body / range_hl if range_hl > 0 else 0
+    upper_wick = curr["high"] - max(curr["open"], curr["close"])
+    lower_wick = min(curr["open"], curr["close"]) - curr["low"]
+
+    if body_ratio < 0.35:
+        if lower_wick >= 2 * upper_wick and lower_wick > 0:
+            return {"pattern": "Bullish Pin Bar", "bias": "BUY", "bonus": 8}
+        if upper_wick >= 2 * lower_wick and upper_wick > 0:
+            return {"pattern": "Bearish Pin Bar", "bias": "SELL", "bonus": 8}
+
+    if prev:
+        prev_body = abs(prev["close"] - prev["open"])
+        if body > prev_body * 1.2:
+            if curr["close"] > curr["open"] and prev["close"] < prev["open"]:
+                return {"pattern": "Bullish Engulfing", "bias": "BUY", "bonus": 10}
+            if curr["close"] < curr["open"] and prev["close"] > prev["open"]:
+                return {"pattern": "Bearish Engulfing", "bias": "SELL", "bonus": 10}
+
+    if body_ratio < 0.05:
+        return {"pattern": "Doji", "bias": "neutral", "bonus": 2}
+
+    if lower_wick >= 2 * body and upper_wick <= body * 0.5:
+        return {"pattern": "Hammer", "bias": "BUY", "bonus": 6}
+    if upper_wick >= 2 * body and lower_wick <= body * 0.5:
+        return {"pattern": "Shooting Star", "bias": "SELL", "bonus": 6}
+
+    return {"pattern": "none", "bias": "neutral", "bonus": 0}
+
+def detect_candle_patterns(prices):
+    if len(prices) < 30:
+        return {"pattern": "none", "bias": "neutral", "bonus": 0}
+    candles = []
+    for i in range(3):
+        start = -(30 - i * 10)
+        end = -(20 - i * 10) if (20 - i * 10) > 0 else None
+        chunk = prices[start:end]
+        if len(chunk) < 5:
+            continue
+        candles.append({
+            "open": chunk[0], "close": chunk[-1],
+            "high": max(chunk), "low": min(chunk),
+            "body": abs(chunk[-1] - chunk[0]),
+            "range": max(chunk) - min(chunk),
+            "bullish": chunk[-1] > chunk[0]
+        })
+    if len(candles) < 2:
+        return {"pattern": "none", "bias": "neutral", "bonus": 0}
+    return detect_candle_patterns_from_ohlc(candles)
