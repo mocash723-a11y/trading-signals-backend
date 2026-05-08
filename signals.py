@@ -10,8 +10,8 @@ from indicators import (
     adx, atr, detect_candle_patterns_from_ohlc
 )
 from feedback import get_adaptive_threshold, save_pending_signal
-import joblib
-import os
+#import joblib
+#import os
 
 MIN_TICKS = 60
 current_signals = {}
