@@ -1,23 +1,31 @@
 from datetime import datetime, timezone
 from feed import (
     get_prices, get_all_symbols, get_signal_validity,
-    get_pair_min_confidence, BTC_EXCLUDED_TIMEFRAMES, is_forex_session
+    get_pair_min_confidence, BTC_EXCLUDED_TIMEFRAMES, is_forex_session,
+    get_closed_candles
 )
 from indicators import (
     rsi, ema, macd, bollinger_bands, stochastic, tick_momentum,
-    multi_timeframe_confirm, detect_candle_patterns, session_quality
+    multi_timeframe_confirm, detect_candle_patterns, session_quality,
+    adx, atr, detect_candle_patterns_from_ohlc
 )
-from feedback import get_adaptive_threshold
+from feedback import get_adaptive_threshold, save_pending_signal
+import joblib
+import os
 
 MIN_TICKS = 60
 current_signals = {}
 
+ML_MODEL_PATH = "model.pkl"
+ml_model = None
+if os.path.exists(ML_MODEL_PATH):
+    try:
+        ml_model = joblib.load(ML_MODEL_PATH)
+        print("ML model loaded for confidence estimation.")
+    except Exception as e:
+        print(f"ML model load failed: {e}")
+
 def _get_min_confidence(symbol, timeframe):
-    """
-    Returns the effective minimum confidence for a pair/timeframe.
-    Uses the HIGHER of the pair's default threshold or the adaptive
-    threshold learned from user feedback.
-    """
     pair_default = get_pair_min_confidence(symbol)
     adaptive = get_adaptive_threshold(symbol, timeframe)
     return max(pair_default, adaptive)
@@ -28,7 +36,6 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
         return None
 
     validity_seconds = get_signal_validity(timeframe)
-
     signal = {
         "id": f"{symbol}_{timeframe}_{int(datetime.now().timestamp())}",
         "asset": name,
@@ -47,35 +54,94 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
     }
     if extras:
         signal.update(extras)
+    # After building, save pending signal for ML training
+    if signal:
+        try:
+            # We'll capture indicator snapshot in each strategy and pass via extras or directly
+            # For now we'll call save_pending_signal with whatever indicators we have
+            # We'll adjust each strategy to call this after building
+            # The strategy functions will call save_pending_signal directly after _build_signal returns
+            pass
+        except Exception as e:
+            print(f"Pending save error: {e}")
     return signal
 
-def _apply_boosters(symbol, prices, direction, base_confidence, reasons):
+def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles_1m=None):
     confidence = base_confidence
     mtf = multi_timeframe_confirm(prices, direction)
     if mtf["confirmed"]:
         confidence += mtf["bonus"]
         reasons.append(f"Multi-TF confirmed ({mtf['agreement']} agree)")
-    candle = detect_candle_patterns(prices)
-    if candle["bias"] == direction and candle["bonus"] > 0:
+
+    # Real candle patterns using OHLC candles if available
+    if candles_1m and len(candles_1m) >= 2:
+        candle = detect_candle_patterns_from_ohlc(candles_1m)
+    else:
+        candle = detect_candle_patterns(prices)
+    if candle and candle["bias"] == direction and candle["bonus"] > 0:
         confidence += candle["bonus"]
         reasons.append(f"{candle['pattern']} detected")
+
     session = session_quality(symbol)
     confidence *= session["multiplier"]
     if session["quality"] == "excellent":
         reasons.append("Peak session")
     elif session["quality"] == "poor":
         reasons.append("Low liquidity")
+
+    # ADX filter
+    if not symbol.startswith("cry") and candles_1m and len(candles_1m) >= 15:
+        highs = [c["high"] for c in candles_1m[-15:]]
+        lows = [c["low"] for c in candles_1m[-15:]]
+        closes = [c["close"] for c in candles_1m[-15:]]
+        adx_val = adx(highs, lows, closes, period=14)
+        if adx_val and adx_val["adx"] < 20:
+            confidence *= 0.9
+            reasons.append("Low ADX (ranging)")
+
     return confidence
 
 def _session_allows_signal(symbol):
-    """Block forex signals during dead zone (after 20:00 UTC)."""
     if symbol.startswith("cry"):
-        return True  # Crypto always allowed
+        return True
     session = is_forex_session()
     return not session["dead_zone"]
 
-# ── Timeframe strategies ──────────────────────────────────────────────────────
+def ml_confidence(symbol, timeframe, direction, prices):
+    if not ml_model:
+        return None
+    try:
+        features = []
+        rsi7 = rsi(prices, 7) or 50
+        rsi14 = rsi(prices, 14) or 50
+        features.extend([rsi7, rsi14])
 
+        macdd = macd(prices, 12, 26, 9)
+        if macdd:
+            features.extend([macdd["macd_line"], macdd["signal_line"], macdd["histogram"]])
+        else:
+            features.extend([0, 0, 0])
+
+        bb = bollinger_bands(prices, 20, 2.0)
+        features.append(bb["percent_b"] if bb else 0.5)
+
+        stoch = stochastic(prices, 14)
+        features.append(stoch["k"] if stoch else 50)
+
+        # ADX placeholder
+        features.append(25)
+
+        # direction encoding
+        features.append(1 if direction == "BUY" else 0)
+
+        prob_up = ml_model.predict_proba([features])[0][1]
+        conf = prob_up * 100 if direction == "BUY" else (1 - prob_up) * 100
+        return round(conf, 1)
+    except Exception as e:
+        print(f"ML confidence error: {e}")
+        return None
+
+# ── Timeframe strategies ──────────────────────────────────────────────────────
 def signal_5s(symbol, name, prices):
     if symbol in ("cryBTCUSD",) or not _session_allows_signal(symbol):
         return None
@@ -86,8 +152,21 @@ def signal_5s(symbol, name, prices):
         return None
     direction = momentum["direction"]
     reasons = [f"{momentum['consecutive']} consecutive {direction} ticks"]
-    confidence = _apply_boosters(symbol, prices, direction, momentum["strength"] * 0.85, reasons)
-    return _build_signal(symbol, name, direction, "5s", confidence, prices[-1], " | ".join(reasons))
+    base_conf = momentum["strength"] * 0.85
+    ml_conf = ml_confidence(symbol, "5s", direction, prices)
+    if ml_conf:
+        base_conf = ml_conf
+    candles = get_closed_candles(symbol)
+    confidence = _apply_boosters(symbol, prices, direction, base_conf, reasons, candles)
+    signal = _build_signal(symbol, name, direction, "5s", confidence, prices[-1], " | ".join(reasons))
+    if signal:
+        # Save pending signal for ML
+        try:
+            indicators = {"rsi7": rsi(prices, 7) or 50, "rsi14": rsi(prices, 14) or 50}
+            save_pending_signal(signal["id"], symbol, "5s", direction, confidence, indicators)
+        except:
+            pass
+    return signal
 
 def signal_1min(symbol, name, prices):
     if symbol in BTC_EXCLUDED_TIMEFRAMES or not _session_allows_signal(symbol):
@@ -114,8 +193,24 @@ def signal_1min(symbol, name, prices):
     if (direction == "BUY" and rsi_val < 45) or (direction == "SELL" and rsi_val > 55):
         base = 72
         reasons.append("RSI confirms")
-    confidence = _apply_boosters(symbol, prices, direction, base, reasons)
-    return _build_signal(symbol, name, direction, "1min", confidence, prices[-1], " | ".join(reasons))
+    ml_conf = ml_confidence(symbol, "1min", direction, prices)
+    if ml_conf:
+        base = ml_conf
+    candles = get_closed_candles(symbol)
+    confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
+    signal = _build_signal(symbol, name, direction, "1min", confidence, prices[-1], " | ".join(reasons))
+    if signal:
+        try:
+            indicators = {
+                "rsi7": rsi_val,
+                "rsi14": rsi(sample, 14) or 50,
+                "ema5": ema5_now,
+                "ema13": ema13_now
+            }
+            save_pending_signal(signal["id"], symbol, "1min", direction, confidence, indicators)
+        except:
+            pass
+    return signal
 
 def signal_3min(symbol, name, prices):
     if symbol == "cryBTCUSD" or not _session_allows_signal(symbol):
@@ -132,17 +227,41 @@ def signal_3min(symbol, name, prices):
     if rsi_val < 35: bull += 1; reasons.append(f"RSI oversold ({rsi_val})")
     elif rsi_val > 65: bear += 1; reasons.append(f"RSI overbought ({rsi_val})")
     if macd_val["cross"] == "bullish": bull += 1; reasons.append("MACD bullish cross")
-    elif macd_val["cross"] == "bearish": bear += 1; reasons.append("MACD bearish cross")
     elif macd_val["histogram"] > 0: bull += 1
+    elif macd_val["cross"] == "bearish": bear += 1; reasons.append("MACD bearish cross")
     elif macd_val["histogram"] < 0: bear += 1
     if stoch["oversold"]: bull += 1; reasons.append("Stochastic oversold")
     elif stoch["overbought"]: bear += 1; reasons.append("Stochastic overbought")
     if bull >= 2:
-        confidence = _apply_boosters(symbol, prices, "BUY", 63 + bull * 7, reasons)
-        return _build_signal(symbol, name, "BUY", "3min", confidence, prices[-1], " | ".join(reasons))
+        direction = "BUY"
+        base = 63 + bull * 7
+        ml_conf = ml_confidence(symbol, "3min", direction, prices)
+        if ml_conf: base = ml_conf
+        candles = get_closed_candles(symbol)
+        confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
+        signal = _build_signal(symbol, name, direction, "3min", confidence, prices[-1], " | ".join(reasons))
+        if signal:
+            try:
+                indicators = {"rsi14": rsi_val, "macd_line": macd_val["macd_line"], "stoch_k": stoch["k"]}
+                save_pending_signal(signal["id"], symbol, "3min", direction, confidence, indicators)
+            except:
+                pass
+        return signal
     elif bear >= 2:
-        confidence = _apply_boosters(symbol, prices, "SELL", 63 + bear * 7, reasons)
-        return _build_signal(symbol, name, "SELL", "3min", confidence, prices[-1], " | ".join(reasons))
+        direction = "SELL"
+        base = 63 + bear * 7
+        ml_conf = ml_confidence(symbol, "3min", direction, prices)
+        if ml_conf: base = ml_conf
+        candles = get_closed_candles(symbol)
+        confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
+        signal = _build_signal(symbol, name, direction, "3min", confidence, prices[-1], " | ".join(reasons))
+        if signal:
+            try:
+                indicators = {"rsi14": rsi_val, "macd_line": macd_val["macd_line"], "stoch_k": stoch["k"]}
+                save_pending_signal(signal["id"], symbol, "3min", direction, confidence, indicators)
+            except:
+                pass
+        return signal
     return None
 
 def signal_5min(symbol, name, prices):
@@ -162,15 +281,39 @@ def signal_5min(symbol, name, prices):
     if bb["percent_b"] < 0.25: bull += 1; reasons.append("Price near lower BB")
     elif bb["percent_b"] > 0.75: bear += 1; reasons.append("Price near upper BB")
     if macd_val["cross"] == "bullish": bull += 2; reasons.append("MACD bullish cross")
-    elif macd_val["histogram"] > 0: bull += 1; reasons.append("MACD positive")
+    elif macd_val["histogram"] > 0: bull += 1
     elif macd_val["cross"] == "bearish": bear += 2; reasons.append("MACD bearish cross")
-    elif macd_val["histogram"] < 0: bear += 1; reasons.append("MACD negative")
+    elif macd_val["histogram"] < 0: bear += 1
     if bull >= 3:
-        confidence = _apply_boosters(symbol, prices, "BUY", 68 + min(bull * 5, 18), reasons)
-        return _build_signal(symbol, name, "BUY", "5min", confidence, prices[-1], " | ".join(reasons))
+        direction = "BUY"
+        base = 68 + min(bull * 5, 18)
+        ml_conf = ml_confidence(symbol, "5min", direction, prices)
+        if ml_conf: base = ml_conf
+        candles = get_closed_candles(symbol)
+        confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
+        signal = _build_signal(symbol, name, direction, "5min", confidence, prices[-1], " | ".join(reasons))
+        if signal:
+            try:
+                indicators = {"rsi14": rsi_val, "macd_line": macd_val["macd_line"], "bb_percent_b": bb["percent_b"]}
+                save_pending_signal(signal["id"], symbol, "5min", direction, confidence, indicators)
+            except:
+                pass
+        return signal
     elif bear >= 3:
-        confidence = _apply_boosters(symbol, prices, "SELL", 68 + min(bear * 5, 18), reasons)
-        return _build_signal(symbol, name, "SELL", "5min", confidence, prices[-1], " | ".join(reasons))
+        direction = "SELL"
+        base = 68 + min(bear * 5, 18)
+        ml_conf = ml_confidence(symbol, "5min", direction, prices)
+        if ml_conf: base = ml_conf
+        candles = get_closed_candles(symbol)
+        confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
+        signal = _build_signal(symbol, name, direction, "5min", confidence, prices[-1], " | ".join(reasons))
+        if signal:
+            try:
+                indicators = {"rsi14": rsi_val, "macd_line": macd_val["macd_line"], "bb_percent_b": bb["percent_b"]}
+                save_pending_signal(signal["id"], symbol, "5min", direction, confidence, indicators)
+            except:
+                pass
+        return signal
     return None
 
 STRATEGY_MAP = {
@@ -215,25 +358,21 @@ def get_signal_for(symbol, timeframe):
 def get_recommendations():
     all_sigs = get_all_signals()
     session = is_forex_session()
-
     if session["dead_zone"]:
         return {
             "status": "low_liquidity",
             "message": "Markets are in low liquidity hours (after 20:00 UTC). Signals are paused to protect accuracy. Come back during London session (7am UTC).",
             "recommendations": []
         }
-
     if not all_sigs:
         return {
             "status": "loading",
             "message": "Collecting price data... check back in 2 minutes.",
             "recommendations": []
         }
-
     top3 = all_sigs[:3]
     rank_labels = ["Best Trade Now", "Second Best", "Third Best"]
     recommendations = []
-
     for i, sig in enumerate(top3):
         sess = session_quality(sig["symbol"])
         recommendations.append({
@@ -254,10 +393,9 @@ def get_recommendations():
             "reason": sig["reason"],
             "timestamp": sig["timestamp"],
         })
-
     return {
         "status": "ok",
-        "session": session["session_label"],
+        "session": session.get("session_label", ""),
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "recommendations": recommendations
     }
