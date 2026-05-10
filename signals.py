@@ -2,7 +2,8 @@ from datetime import datetime, timezone
 from feed import (
     get_prices, get_all_symbols, get_signal_validity,
     get_pair_min_confidence, BTC_EXCLUDED_TIMEFRAMES,
-    is_forex_session, get_closed_candles
+    GOLD_EXCLUDED_TIMEFRAMES, is_forex_session,
+    get_closed_candles, is_gold_session
 )
 from indicators import (
     rsi, ema, macd, bollinger_bands, stochastic, tick_momentum,
@@ -11,8 +12,7 @@ from indicators import (
 )
 from feedback import get_adaptive_threshold, save_pending_signal
 
-ml_model = None  # Placeholder — activated when model.pkl is trained and uploaded
-
+ml_model = None
 current_signals = {}
 
 def _get_min_confidence(symbol, timeframe):
@@ -47,14 +47,10 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
 
 def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles_1m=None):
     confidence = base_confidence
-
-    # Multi-timeframe confirmation
     mtf = multi_timeframe_confirm(prices, direction)
     if mtf["confirmed"]:
         confidence += mtf["bonus"]
         reasons.append(f"Multi-TF confirmed ({mtf['agreement']} agree)")
-
-    # Candlestick patterns — use real OHLC if available
     if candles_1m and len(candles_1m) >= 2:
         candle = detect_candle_patterns_from_ohlc(candles_1m)
     else:
@@ -62,16 +58,12 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
     if candle and candle["bias"] == direction and candle["bonus"] > 0:
         confidence += candle["bonus"]
         reasons.append(f"{candle['pattern']} detected")
-
-    # Session quality multiplier
     session = session_quality(symbol)
     confidence *= session["multiplier"]
     if session["quality"] == "excellent":
         reasons.append("Peak session")
     elif session["quality"] == "poor":
         reasons.append("Low liquidity")
-
-    # ADX filter — penalise signals in ranging/choppy markets
     if not symbol.startswith("cry") and candles_1m and len(candles_1m) >= 15:
         highs  = [c["high"]  for c in candles_1m[-15:]]
         lows   = [c["low"]   for c in candles_1m[-15:]]
@@ -80,19 +72,25 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
         if adx_val and adx_val["adx"] < 20:
             confidence *= 0.9
             reasons.append("Low ADX — ranging market")
-
     return confidence
 
 def _session_allows_signal(symbol):
+    """Check if current session allows signals for this symbol."""
     if symbol.startswith("cry"):
-        return True
-    return not is_forex_session()["dead_zone"]
+        return True  # Bitcoin always allowed
+    if symbol == "frxXAUUSD":
+        return is_gold_session()["active"]  # Gold — check gold session
+    return not is_forex_session()["dead_zone"]  # Forex — check dead zone
 
 # ── Timeframe strategies ──────────────────────────────────────────────────────
 
 def signal_5s(symbol, name, prices):
-    # BUG FIX: Check symbol directly, not against timeframe set
-    if symbol == "cryBTCUSD" or not _session_allows_signal(symbol):
+    # Bitcoin and Gold excluded from 5s
+    if symbol == "cryBTCUSD" or symbol in GOLD_EXCLUDED_TIMEFRAMES:
+        return None
+    if symbol == "frxXAUUSD":
+        return None
+    if not _session_allows_signal(symbol):
         return None
     if len(prices) < 20:
         return None
@@ -113,8 +111,10 @@ def signal_5s(symbol, name, prices):
     return signal
 
 def signal_1min(symbol, name, prices):
-    # BUG FIX: Correctly exclude Bitcoin from 1min (was checking symbol in timeframe set before)
-    if symbol == "cryBTCUSD" or not _session_allows_signal(symbol):
+    # Bitcoin and Gold excluded from 1min
+    if symbol == "cryBTCUSD" or symbol == "frxXAUUSD":
+        return None
+    if not _session_allows_signal(symbol):
         return None
     if len(prices) < 70:
         return None
@@ -149,7 +149,10 @@ def signal_1min(symbol, name, prices):
     return signal
 
 def signal_3min(symbol, name, prices):
-    if symbol == "cryBTCUSD" or not _session_allows_signal(symbol):
+    # Bitcoin excluded from 3min
+    if symbol == "cryBTCUSD":
+        return None
+    if not _session_allows_signal(symbol):
         return None
     if len(prices) < 160:
         return None
@@ -160,15 +163,14 @@ def signal_3min(symbol, name, prices):
     if not all([rsi_val, macd_val, stoch]):
         return None
     bull, bear, reasons = 0, 0, []
-    if rsi_val < 35:  bull += 1; reasons.append(f"RSI oversold ({rsi_val})")
+    if rsi_val < 35:   bull += 1; reasons.append(f"RSI oversold ({rsi_val})")
     elif rsi_val > 65: bear += 1; reasons.append(f"RSI overbought ({rsi_val})")
     if macd_val["cross"] == "bullish":   bull += 1; reasons.append("MACD bullish cross")
     elif macd_val["cross"] == "bearish": bear += 1; reasons.append("MACD bearish cross")
     elif macd_val["histogram"] > 0: bull += 1
     elif macd_val["histogram"] < 0: bear += 1
-    if stoch["oversold"]:   bull += 1; reasons.append("Stochastic oversold")
+    if stoch["oversold"]:    bull += 1; reasons.append("Stochastic oversold")
     elif stoch["overbought"]: bear += 1; reasons.append("Stochastic overbought")
-
     for direction, score in [("BUY", bull), ("SELL", bear)]:
         if score >= 2:
             candles = get_closed_candles(symbol)
@@ -184,7 +186,7 @@ def signal_3min(symbol, name, prices):
     return None
 
 def signal_5min(symbol, name, prices):
-    if not _session_allows_signal(symbol) and not symbol.startswith("cry"):
+    if not _session_allows_signal(symbol):
         return None
     if len(prices) < 260:
         return None
@@ -195,7 +197,7 @@ def signal_5min(symbol, name, prices):
     if not all([rsi_val, macd_val, bb]):
         return None
     bull, bear, reasons = 0, 0, []
-    if rsi_val < 35:  bull += 1; reasons.append(f"RSI oversold ({rsi_val})")
+    if rsi_val < 35:   bull += 1; reasons.append(f"RSI oversold ({rsi_val})")
     elif rsi_val > 65: bear += 1; reasons.append(f"RSI overbought ({rsi_val})")
     if bb["percent_b"] < 0.25: bull += 1; reasons.append("Price near lower BB")
     elif bb["percent_b"] > 0.75: bear += 1; reasons.append("Price near upper BB")
@@ -203,7 +205,6 @@ def signal_5min(symbol, name, prices):
     elif macd_val["histogram"] > 0:      bull += 1; reasons.append("MACD positive")
     elif macd_val["cross"] == "bearish": bear += 2; reasons.append("MACD bearish cross")
     elif macd_val["histogram"] < 0:      bear += 1; reasons.append("MACD negative")
-
     for direction, score in [("BUY", bull), ("SELL", bear)]:
         if score >= 3:
             candles = get_closed_candles(symbol)
@@ -219,8 +220,10 @@ def signal_5min(symbol, name, prices):
     return None
 
 STRATEGY_MAP = {
-    "5s": signal_5s, "1min": signal_1min,
-    "3min": signal_3min, "5min": signal_5min
+    "5s": signal_5s,
+    "1min": signal_1min,
+    "3min": signal_3min,
+    "5min": signal_5min
 }
 
 def generate_signals():
@@ -261,7 +264,7 @@ def get_recommendations():
     if session["dead_zone"]:
         return {
             "status": "low_liquidity",
-            "message": "Markets are in low liquidity hours (after 20:00 UTC). Signals paused to protect accuracy. Come back during London session (7am UTC).",
+            "message": "Markets in low liquidity hours (after 20:00 UTC / 10pm SAST). Come back during London session (7am UTC / 9am SAST).",
             "recommendations": []
         }
     if not all_sigs:
@@ -295,7 +298,7 @@ def get_recommendations():
         })
     return {
         "status": "ok",
-        "session": session["session_label"],   # BUG FIX: now correctly populated
+        "session": session["session_label"],
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "recommendations": recommendations
     }
