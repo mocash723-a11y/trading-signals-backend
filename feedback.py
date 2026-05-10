@@ -78,7 +78,7 @@ def record_outcome(symbol: str, timeframe: str, direction: str, outcome: str, co
     }
     try:
         db = _get_db()
-        if db:
+        if db is not None:
             db[COLL_TRAINING].insert_one(doc)
     except Exception as e:
         print(f"MongoDB write error (non-fatal): {e}")
@@ -172,7 +172,7 @@ def save_pending_signal(signal_id, symbol, timeframe, direction, confidence, ind
     }
     try:
         db = _get_db()
-        if db:
+        if db is not None:
             db[COLL_PENDING].insert_one(doc)
     except Exception as e:
         print(f"Pending signal save error (non-fatal): {e}")
@@ -181,7 +181,7 @@ def update_signal_outcome(signal_id, outcome):
     """Link a WIN/LOSS result to the specific signal that generated it."""
     try:
         db = _get_db()
-        if db:
+        if db is not None:
             db[COLL_PENDING].update_one(
                 {"signal_id": signal_id},
                 {"$set": {"outcome": outcome, "resolved_at": datetime.now(timezone.utc)}}
