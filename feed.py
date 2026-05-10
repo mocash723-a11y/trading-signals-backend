@@ -35,38 +35,57 @@ ASSET_GROUPS = {
     },
     "crypto": {
         "label": "Crypto",
-        "note": "Trades 24/7. High volatility.",
-        "symbols": {
-            "cryBTCUSD": "Bitcoin/USD",
-        }
+        "note": "5min signals only. High volatility.",
+        "symbols": {"cryBTCUSD": "Bitcoin/USD"}
     }
 }
+
+# ── BUG FIX: Per-pair confidence thresholds restored ─────────────────────────
+PAIR_MIN_CONFIDENCE = {
+    "frxEURUSD": 62,
+    "frxGBPUSD": 64,
+    "frxUSDJPY": 64,
+    "frxAUDUSD": 65,
+    "frxUSDCAD": 65,
+    "frxEURGBP": 66,
+    "frxGBPJPY": 70,   # Volatile pair — higher bar
+    "frxEURJPY": 70,   # Volatile pair — higher bar
+    "cryBTCUSD": 78,   # Crypto — only very high confidence
+}
+
+# Bitcoin excluded from fast timeframes
+BTC_EXCLUDED_TIMEFRAMES = {"5s", "1min", "3min"}
+
+# Signal validity windows (seconds)
+SIGNAL_VALIDITY = {"5s": 20, "1min": 45, "3min": 90, "5min": 120}
 
 TICK_HISTORY_SIZE = 600
 tick_data = {symbol: deque(maxlen=TICK_HISTORY_SIZE) for symbol in ASSETS}
 latest_price = {}
 active_symbols = set()
 
-# ── OHLC candle builder ─────────────────────────────────────────────────────
-candle_builders = defaultdict(lambda: {"open": None, "high": None, "low": None, "close": None, "volume": 0, "start_epoch": None})
-closed_candles = defaultdict(list)   # { "symbol_1min": [candle, ...], ... }
+# ── Real OHLC candle builder ──────────────────────────────────────────────────
+candle_builders = defaultdict(lambda: {
+    "open": None, "high": None, "low": None,
+    "close": None, "volume": 0, "start_epoch": None
+})
+closed_candles = defaultdict(list)
+_last_1m_key = defaultdict(str)
+_last_5m_key = defaultdict(str)
 
 def _build_key(symbol, epoch, timeframe_minutes):
     dt = datetime.utcfromtimestamp(epoch)
     if timeframe_minutes == 5:
         minute_bucket = (dt.minute // 5) * 5
         dt = dt.replace(minute=minute_bucket, second=0, microsecond=0)
-    else:  # 1 minute
+    else:
         dt = dt.replace(second=0, microsecond=0)
     return f"{symbol}_{dt.strftime('%Y%m%d%H%M')}"
 
 def update_candle_for_key(key, price, epoch):
     c = candle_builders[key]
     if c["open"] is None:
-        c["open"] = price
-        c["high"] = price
-        c["low"] = price
-        c["close"] = price
+        c["open"] = c["high"] = c["low"] = c["close"] = price
         c["volume"] = 1
         c["start_epoch"] = epoch
     else:
@@ -75,13 +94,10 @@ def update_candle_for_key(key, price, epoch):
         c["close"] = price
         c["volume"] += 1
 
-_last_1m_key = defaultdict(str)
-_last_5m_key = defaultdict(str)
-
-def finalise_candle(builder_key, tf_minutes):
+def finalise_candle(builder_key):
     candle = candle_builders.pop(builder_key, None)
     if candle and candle["open"] is not None:
-        list_key = builder_key.rsplit("_", 1)[0]  # "symbol_YYYYMMDDHHMM"
+        list_key = "_".join(builder_key.split("_")[:-1])
         candles = closed_candles[list_key]
         candles.append(candle)
         if len(candles) > 200:
@@ -119,8 +135,6 @@ def process_tick(raw_message):
             epoch = tick["epoch"]
             if symbol not in tick_data:
                 return
-
-            # Store raw tick
             tick_data[symbol].append({
                 "price": price,
                 "time": datetime.utcfromtimestamp(epoch),
@@ -128,18 +142,16 @@ def process_tick(raw_message):
             })
             latest_price[symbol] = price
             active_symbols.add(symbol)
-
-            # Build 1‑min candles
+            # Build 1-min candles
             key_1m = _build_key(symbol, epoch, 1)
             if _last_1m_key[symbol] and key_1m != _last_1m_key[symbol]:
-                finalise_candle(_last_1m_key[symbol], 1)
+                finalise_candle(_last_1m_key[symbol])
             _last_1m_key[symbol] = key_1m
             update_candle_for_key(key_1m, price, epoch)
-
-            # Build 5‑min candles
+            # Build 5-min candles
             key_5m = _build_key(symbol, epoch, 5)
             if _last_5m_key.get(symbol) and key_5m != _last_5m_key[symbol]:
-                finalise_candle(_last_5m_key[symbol], 5)
+                finalise_candle(_last_5m_key[symbol])
             _last_5m_key[symbol] = key_5m
             update_candle_for_key(key_5m, price, epoch)
     except Exception:
@@ -165,27 +177,41 @@ def get_all_symbols():
 def get_asset_groups():
     return ASSET_GROUPS
 
-def is_forex_session():
-    hour = datetime.utcnow().hour
-    return {
-        "london":   7  <= hour < 16,
-        "new_york": 12 <= hour < 21,
-        "tokyo":    0  <= hour < 9,
-        "overlap":  12 <= hour < 16,
-        "dead_zone": hour >= 21 or hour < 6,
-        "current_hour_utc": hour
-    }
-
-# ── Missing functions that signals.py expects ─────────────────────────────
-SIGNAL_VALIDITY = {"5s": 30, "1min": 60, "3min": 180, "5min": 300}
-BTC_EXCLUDED_TIMEFRAMES = {"5s", "1min", "3min"}
-
 def get_signal_validity(timeframe):
     return SIGNAL_VALIDITY.get(timeframe, 60)
 
 def get_pair_min_confidence(symbol):
-    return 62
+    return PAIR_MIN_CONFIDENCE.get(symbol, 65)
 
 def get_closed_candles(symbol):
-    """Return list of dict (open/high/low/close/volume/start_epoch) for last 200 candles of symbol."""
     return closed_candles.get(symbol, [])
+
+def is_forex_session():
+    """BUG FIX: Added session_label field that signals.py needs."""
+    hour = datetime.utcnow().hour
+    overlap  = 12 <= hour < 16
+    london   = 7  <= hour < 16
+    new_york = 12 <= hour < 20
+    dead     = hour >= 20 or hour < 6
+    tokyo    = 0  <= hour < 7
+
+    if overlap:
+        label = "London + NY Overlap (Best)"
+    elif london:
+        label = "London Session"
+    elif new_york:
+        label = "NY Session"
+    elif tokyo:
+        label = "Tokyo Session"
+    else:
+        label = "Low Liquidity — Caution"
+
+    return {
+        "london":    london,
+        "new_york":  new_york,
+        "tokyo":     tokyo,
+        "overlap":   overlap,
+        "dead_zone": dead,
+        "current_hour_utc": hour,
+        "session_label": label,   # ← BUG FIX: was missing before
+    }
