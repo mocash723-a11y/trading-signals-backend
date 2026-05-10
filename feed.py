@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 DERIV_WS_URL = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
 
 ASSETS = {
+    # Forex Pairs (Mon-Fri)
     "frxEURUSD": "EUR/USD",
     "frxGBPUSD": "GBP/USD",
     "frxUSDJPY": "USD/JPY",
@@ -15,13 +16,18 @@ ASSETS = {
     "frxEURGBP": "EUR/GBP",
     "frxGBPJPY": "GBP/JPY",
     "frxEURJPY": "EUR/JPY",
+
+    # Gold (Mon-Fri, trades like forex)
+    "frxXAUUSD": "Gold/USD",
+
+    # Crypto (available 24/7 including weekends)
     "cryBTCUSD": "Bitcoin/USD",
 }
 
 ASSET_GROUPS = {
     "forex": {
         "label": "Forex Pairs",
-        "note": "Best accuracy during London & NY sessions (12pm-4pm UTC)",
+        "note": "Best accuracy during London & NY sessions (12pm-4pm UTC / 2pm-6pm SAST)",
         "symbols": {
             "frxEURUSD": "EUR/USD",
             "frxGBPUSD": "GBP/USD",
@@ -33,31 +39,50 @@ ASSET_GROUPS = {
             "frxEURJPY": "EUR/JPY",
         }
     },
+    "commodities": {
+        "label": "Commodities",
+        "note": "Gold trades Mon-Fri. Best on 3min & 5min timeframes. Very reliable technical levels.",
+        "symbols": {
+            "frxXAUUSD": "Gold/USD",
+        }
+    },
     "crypto": {
         "label": "Crypto",
-        "note": "5min signals only. High volatility.",
-        "symbols": {"cryBTCUSD": "Bitcoin/USD"}
+        "note": "Bitcoin available weekends & weekdays. 5min signals only.",
+        "symbols": {
+            "cryBTCUSD": "Bitcoin/USD",
+        }
     }
 }
 
-# ── BUG FIX: Per-pair confidence thresholds restored ─────────────────────────
+# ── Per-pair minimum confidence thresholds ────────────────────────────────────
+# Higher = stricter = fewer but more reliable signals
 PAIR_MIN_CONFIDENCE = {
-    "frxEURUSD": 62,
-    "frxGBPUSD": 64,
-    "frxUSDJPY": 64,
+    "frxEURUSD": 62,   # Most stable forex pair — standard threshold
+    "frxGBPUSD": 64,   # Slightly volatile
+    "frxUSDJPY": 64,   # Clean trends, reliable
     "frxAUDUSD": 65,
     "frxUSDCAD": 65,
-    "frxEURGBP": 66,
-    "frxGBPJPY": 70,   # Volatile pair — higher bar
-    "frxEURJPY": 70,   # Volatile pair — higher bar
-    "cryBTCUSD": 78,   # Crypto — only very high confidence
+    "frxEURGBP": 66,   # Slow mover — needs clear signal
+    "frxGBPJPY": 70,   # Very volatile — high bar
+    "frxEURJPY": 70,   # Very volatile — high bar
+    "frxXAUUSD": 72,   # Gold — sensitive to news, needs strong confirmation
+    "cryBTCUSD": 78,   # Bitcoin — only very high confidence signals
 }
 
-# Bitcoin excluded from fast timeframes
+# Bitcoin excluded from fast timeframes — too noisy
 BTC_EXCLUDED_TIMEFRAMES = {"5s", "1min", "3min"}
 
-# Signal validity windows (seconds)
-SIGNAL_VALIDITY = {"5s": 20, "1min": 45, "3min": 90, "5min": 120}
+# Gold excluded from 5s — moves too slowly for tick momentum
+GOLD_EXCLUDED_TIMEFRAMES = {"5s"}
+
+# Signal validity windows (seconds) — how long signal stays actionable
+SIGNAL_VALIDITY = {
+    "5s":   20,
+    "1min": 45,
+    "3min": 90,
+    "5min": 120,
+}
 
 TICK_HISTORY_SIZE = 600
 tick_data = {symbol: deque(maxlen=TICK_HISTORY_SIZE) for symbol in ASSETS}
@@ -187,7 +212,6 @@ def get_closed_candles(symbol):
     return closed_candles.get(symbol, [])
 
 def is_forex_session():
-    """BUG FIX: Added session_label field that signals.py needs."""
     hour = datetime.utcnow().hour
     overlap  = 12 <= hour < 16
     london   = 7  <= hour < 16
@@ -213,5 +237,39 @@ def is_forex_session():
         "overlap":   overlap,
         "dead_zone": dead,
         "current_hour_utc": hour,
-        "session_label": label,   # ← BUG FIX: was missing before
+        "session_label": label,
+    }
+
+def is_gold_session():
+    """
+    Gold trades Mon-Fri during forex hours.
+    Most active during London open and NY session.
+    Best signals: 9am-12pm SAST (London) and 2pm-6pm SAST (NY)
+    """
+    now = datetime.utcnow()
+    hour = now.hour
+    weekday = now.weekday()  # 0=Monday, 6=Sunday
+
+    # Gold closed on weekends
+    if weekday >= 5:
+        return {
+            "active": False,
+            "label": "Gold market closed (weekend)",
+            "best": False
+        }
+
+    london_open = 7 <= hour < 12
+    ny_session  = 12 <= hour < 20
+    overlap     = 12 <= hour < 16
+    dead        = hour >= 20 or hour < 6
+
+    return {
+        "active": not dead,
+        "label": (
+            "Gold — London + NY Overlap (Best)" if overlap else
+            "Gold — London Open (Good)" if london_open else
+            "Gold — NY Session (Good)" if ny_session else
+            "Gold — Low Activity"
+        ),
+        "best": overlap or london_open
     }
