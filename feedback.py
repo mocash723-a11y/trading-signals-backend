@@ -35,14 +35,20 @@ COLL_TRAINING = "training_examples"
 _mongo_available = False
 
 def _get_db():
-    """Returns MongoDB db object or None if not available."""
     global _mongo_available
     if not MONGO_URI or MONGO_URI == "your_mongodb_atlas_uri":
         return None
     try:
         from pymongo import MongoClient
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-        client.server_info()  # Test connection
+        client = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=5000,
+            tls=True,
+            tlsAllowInvalidCertificates=True
+        )
+        client.admin.command("ping")
         _mongo_available = True
         return client[DB_NAME]
     except Exception as e:
