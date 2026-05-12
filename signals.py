@@ -12,7 +12,20 @@ from indicators import (
 )
 from feedback import get_adaptive_threshold, save_pending_signal
 
+# ── AI Model Loading ─────────────────────────────────────────────────────────
+import joblib
+import os
+
 ml_model = None
+if os.path.exists("model.pkl"):
+    try:
+        ml_model = joblib.load("model.pkl")
+        print("AI model loaded successfully.")
+    except Exception as e:
+        print(f"Model load error: {e}")
+else:
+    print("No model.pkl found — using rule-based confidence only.")
+
 current_signals = {}
 
 def _get_min_confidence(symbol, timeframe):
@@ -75,20 +88,37 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
     return confidence
 
 def _session_allows_signal(symbol):
-    """Check if current session allows signals for this symbol."""
     if symbol.startswith("cry"):
-        return True  # Bitcoin always allowed
+        return True
     if symbol == "frxXAUUSD":
-        return is_gold_session()["active"]  # Gold — check gold session
-    return not is_forex_session()["dead_zone"]  # Forex — check dead zone
+        return is_gold_session()["active"]
+    return not is_forex_session()["dead_zone"]
 
-# ── Timeframe strategies ──────────────────────────────────────────────────────
+def ml_confidence(symbol, timeframe, direction, prices):
+    """Return AI confidence (0-100) if model loaded, else None."""
+    if not ml_model:
+        return None
+    try:
+        # Compute same features as training
+        features = [
+            rsi(prices, 7) or 50,
+            rsi(prices, 14) or 50,
+            macd(prices, 12, 26, 9)["macd_line"] if macd(prices, 12, 26, 9) else 0,
+            stochastic(prices, 14)["k"] if stochastic(prices, 14) else 50,
+            bollinger_bands(prices, 20, 2.0)["percent_b"] if bollinger_bands(prices, 20, 2.0) else 0.5,
+            1 if direction == "BUY" else 0
+        ]
+        prob_up = ml_model.predict_proba([features])[0][1]
+        conf = prob_up * 100 if direction == "BUY" else (1 - prob_up) * 100
+        return round(conf, 1)
+    except Exception as e:
+        print(f"ML confidence error: {e}")
+        return None
+
+# ── Timeframe strategies (updated with uniform feature saving) ────────────────
 
 def signal_5s(symbol, name, prices):
-    # Bitcoin and Gold excluded from 5s
-    if symbol == "cryBTCUSD" or symbol in GOLD_EXCLUDED_TIMEFRAMES:
-        return None
-    if symbol == "frxXAUUSD":
+    if symbol == "cryBTCUSD" or symbol in GOLD_EXCLUDED_TIMEFRAMES or symbol == "frxXAUUSD":
         return None
     if not _session_allows_signal(symbol):
         return None
@@ -99,19 +129,28 @@ def signal_5s(symbol, name, prices):
         return None
     direction = momentum["direction"]
     reasons = [f"{momentum['consecutive']} consecutive {direction} ticks"]
+    base_conf = momentum["strength"] * 0.85
+    ml_conf = ml_confidence(symbol, "5s", direction, prices)
+    base_conf = ml_conf if ml_conf else base_conf
     candles = get_closed_candles(symbol)
-    confidence = _apply_boosters(symbol, prices, direction, momentum["strength"] * 0.85, reasons, candles)
+    confidence = _apply_boosters(symbol, prices, direction, base_conf, reasons, candles)
     signal = _build_signal(symbol, name, direction, "5s", confidence, prices[-1], " | ".join(reasons))
     if signal:
         try:
-            save_pending_signal(signal["id"], symbol, "5s", direction, confidence,
-                                {"rsi7": rsi(prices, 7) or 50, "rsi14": rsi(prices, 14) or 50})
+            indicators = {
+                "rsi7": rsi(prices, 7) or 50,
+                "rsi14": rsi(prices, 14) or 50,
+                "macd_line": macd(prices, 12, 26, 9)["macd_line"] if macd(prices, 12, 26, 9) else 0,
+                "stoch_k": stochastic(prices, 14)["k"] if stochastic(prices, 14) else 50,
+                "bb_percent_b": bollinger_bands(prices, 20, 2.0)["percent_b"] if bollinger_bands(prices, 20, 2.0) else 0.5,
+                "direction_encoded": 1 if direction == "BUY" else 0
+            }
+            save_pending_signal(signal["id"], symbol, "5s", direction, confidence, indicators)
         except:
             pass
     return signal
 
 def signal_1min(symbol, name, prices):
-    # Bitcoin and Gold excluded from 1min
     if symbol == "cryBTCUSD" or symbol == "frxXAUUSD":
         return None
     if not _session_allows_signal(symbol):
@@ -136,20 +175,27 @@ def signal_1min(symbol, name, prices):
     if (direction == "BUY" and rsi_val < 45) or (direction == "SELL" and rsi_val > 55):
         base = 72
         reasons.append("RSI confirms")
+    ml_conf = ml_confidence(symbol, "1min", direction, prices)
+    base = ml_conf if ml_conf else base
     candles = get_closed_candles(symbol)
     confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
     signal = _build_signal(symbol, name, direction, "1min", confidence, prices[-1], " | ".join(reasons))
     if signal:
         try:
-            save_pending_signal(signal["id"], symbol, "1min", direction, confidence,
-                                {"rsi7": rsi_val, "rsi14": rsi(sample, 14) or 50,
-                                 "ema5": ema5_now, "ema13": ema13_now})
+            indicators = {
+                "rsi7": rsi_val,
+                "rsi14": rsi(sample, 14) or 50,
+                "macd_line": macd(sample, 12, 26, 9)["macd_line"] if macd(sample, 12, 26, 9) else 0,
+                "stoch_k": stochastic(sample, 14)["k"] if stochastic(sample, 14) else 50,
+                "bb_percent_b": bollinger_bands(sample, 20, 2.0)["percent_b"] if bollinger_bands(sample, 20, 2.0) else 0.5,
+                "direction_encoded": 1 if direction == "BUY" else 0
+            }
+            save_pending_signal(signal["id"], symbol, "1min", direction, confidence, indicators)
         except:
             pass
     return signal
 
 def signal_3min(symbol, name, prices):
-    # Bitcoin excluded from 3min
     if symbol == "cryBTCUSD":
         return None
     if not _session_allows_signal(symbol):
@@ -173,13 +219,23 @@ def signal_3min(symbol, name, prices):
     elif stoch["overbought"]: bear += 1; reasons.append("Stochastic overbought")
     for direction, score in [("BUY", bull), ("SELL", bear)]:
         if score >= 2:
+            base = 63 + score * 7
+            ml_conf = ml_confidence(symbol, "3min", direction, prices)
+            base = ml_conf if ml_conf else base
             candles = get_closed_candles(symbol)
-            confidence = _apply_boosters(symbol, prices, direction, 63 + score * 7, reasons, candles)
+            confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
             signal = _build_signal(symbol, name, direction, "3min", confidence, prices[-1], " | ".join(reasons))
             if signal:
                 try:
-                    save_pending_signal(signal["id"], symbol, "3min", direction, confidence,
-                                        {"rsi14": rsi_val, "macd_line": macd_val["macd_line"], "stoch_k": stoch["k"]})
+                    indicators = {
+                        "rsi7": rsi(sample, 7) or 50,
+                        "rsi14": rsi_val,
+                        "macd_line": macd_val["macd_line"],
+                        "stoch_k": stoch["k"],
+                        "bb_percent_b": bollinger_bands(sample, 20, 2.0)["percent_b"] if bollinger_bands(sample, 20, 2.0) else 0.5,
+                        "direction_encoded": 1 if direction == "BUY" else 0
+                    }
+                    save_pending_signal(signal["id"], symbol, "3min", direction, confidence, indicators)
                 except:
                     pass
             return signal
@@ -207,13 +263,23 @@ def signal_5min(symbol, name, prices):
     elif macd_val["histogram"] < 0:      bear += 1; reasons.append("MACD negative")
     for direction, score in [("BUY", bull), ("SELL", bear)]:
         if score >= 3:
+            base = 68 + min(score * 5, 18)
+            ml_conf = ml_confidence(symbol, "5min", direction, prices)
+            base = ml_conf if ml_conf else base
             candles = get_closed_candles(symbol)
-            confidence = _apply_boosters(symbol, prices, direction, 68 + min(score * 5, 18), reasons, candles)
+            confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
             signal = _build_signal(symbol, name, direction, "5min", confidence, prices[-1], " | ".join(reasons))
             if signal:
                 try:
-                    save_pending_signal(signal["id"], symbol, "5min", direction, confidence,
-                                        {"rsi14": rsi_val, "macd_line": macd_val["macd_line"], "bb_percent_b": bb["percent_b"]})
+                    indicators = {
+                        "rsi7": rsi(sample, 7) or 50,
+                        "rsi14": rsi_val,
+                        "macd_line": macd_val["macd_line"],
+                        "stoch_k": stochastic(sample, 14)["k"] if stochastic(sample, 14) else 50,
+                        "bb_percent_b": bb["percent_b"],
+                        "direction_encoded": 1 if direction == "BUY" else 0
+                    }
+                    save_pending_signal(signal["id"], symbol, "5min", direction, confidence, indicators)
                 except:
                     pass
             return signal
