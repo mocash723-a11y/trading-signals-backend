@@ -34,9 +34,9 @@ def _get_min_confidence(symbol, timeframe):
     return max(pair_default, adaptive)
 
 def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, reason, extras=None):
+    confidence = float(confidence)                # ← FIX: convert to native float
     min_conf = _get_min_confidence(symbol, timeframe)
-    confidence = float(confidence)        # ← new line you add
-if confidence < min_conf:
+    if confidence < min_conf:
         return None
     validity_seconds = get_signal_validity(timeframe)
     signal = {
@@ -47,7 +47,7 @@ if confidence < min_conf:
         "timeframe": timeframe,
         "entry_price": round(entry_price, 5),
         "confidence": min(int(confidence), 93),
-        "is_vip": bool(confidence >= 78),   # ← wrap in bool()
+        "is_vip": bool(confidence >= 78),         # ← FIX: native bool
         "reason": reason,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "valid_for_seconds": validity_seconds,
@@ -60,8 +60,7 @@ if confidence < min_conf:
     return signal
 
 def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles_1m=None):
-    confidence = float(base_confidence)          # ← convert to native float
-    ...
+    confidence = float(base_confidence)          # ← FIX: convert to native float
     mtf = multi_timeframe_confirm(prices, direction)
     if mtf["confirmed"]:
         confidence += mtf["bonus"]
@@ -101,7 +100,6 @@ def ml_confidence(symbol, timeframe, direction, prices):
     if not ml_model:
         return None
     try:
-        # Compute same features as training
         features = [
             rsi(prices, 7) or 50,
             rsi(prices, 14) or 50,
@@ -117,7 +115,7 @@ def ml_confidence(symbol, timeframe, direction, prices):
         print(f"ML confidence error: {e}")
         return None
 
-# ── Timeframe strategies (updated with uniform feature saving) ────────────────
+# ── Timeframe strategies ────────────────────────────────────────────────
 
 def signal_5s(symbol, name, prices):
     if symbol == "cryBTCUSD" or symbol in GOLD_EXCLUDED_TIMEFRAMES or symbol == "frxXAUUSD":
