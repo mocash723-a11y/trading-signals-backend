@@ -89,11 +89,15 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
     return confidence
 
 def _session_allows_signal(symbol):
-    if symbol.startswith("cry"):
-        return True
-    if symbol == "frxXAUUSD":
-        return is_gold_session()["active"]
-    return not is_forex_session()["dead_zone"]
+    # Allow Forex & Crypto 24/5 (Monday to Friday)
+    # Gold also allowed 24/5 (Deriv provides quotes even outside "official" gold hours)
+    # Weekend check: if you want to block Saturday/Sunday entirely, keep the weekday check
+    from datetime import datetime
+    weekday = datetime.utcnow().weekday()  # 0=Monday, 6=Sunday
+    if weekday >= 5:  # Saturday or Sunday
+        return False   # No forex/gold signals on weekends (Deriv has very wide spreads)
+    # Otherwise always allow – no dead zone restriction
+    return True
 
 def ml_confidence(symbol, timeframe, direction, prices):
     """Return AI confidence (0-100) if model loaded, else None."""
