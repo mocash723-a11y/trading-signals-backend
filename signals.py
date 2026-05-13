@@ -331,12 +331,7 @@ def get_signal_for(symbol, timeframe):
 def get_recommendations():
     all_sigs = get_all_signals()
     session = is_forex_session()
-    if session["dead_zone"]:
-        return {
-            "status": "low_liquidity",
-            "message": "Markets in low liquidity hours (after 20:00 UTC / 10pm SAST). Come back during London session (7am UTC / 9am SAST).",
-            "recommendations": []
-        }
+# No longer block signals based on dead_zone
     if not all_sigs:
         return {
             "status": "loading",
