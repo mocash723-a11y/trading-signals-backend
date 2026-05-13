@@ -59,7 +59,8 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
     return signal
 
 def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles_1m=None):
-    confidence = base_confidence
+    confidence = float(base_confidence)          # ← convert to native float
+    ...
     mtf = multi_timeframe_confirm(prices, direction)
     if mtf["confirmed"]:
         confidence += mtf["bonus"]
