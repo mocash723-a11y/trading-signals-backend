@@ -4,15 +4,13 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from typing import Optional
 import asyncio
+import os
 from feed import start_feed, get_latest_ticks, get_asset_groups
 from signals import (
     generate_signals, get_all_signals,
     get_signal_for, get_recommendations, ml_model
 )
 from feedback import record_outcome, get_stats, get_pair_accuracy, update_signal_outcome
-
-# ML model loading is handled in signals.py now – no heavy imports here
-# import joblib  ← REMOVED
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,7 +35,37 @@ async def signal_loop():
             print(f"Signal error: {e}")
         await asyncio.sleep(5)
 
-# ── Basic endpoints ───────────────────────────────────────────────────────────
+# ── Auto‑match fallback for missing signal_id ─────────────────────────────
+def find_and_resolve_pending_signal(symbol: str, timeframe: str, direction: str, outcome: str):
+    """If frontend doesn't send signal_id, match the most recent pending signal."""
+    try:
+        from pymongo import MongoClient
+        MONGO_URI = os.environ.get("MONGO_URI", "")
+        if not MONGO_URI:
+            return None
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        db = client["trading_signals"]
+        # Find newest pending signal for same symbol, timeframe, direction
+        pending = db.pending_signals.find_one(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "direction": direction,
+                "outcome": "pending"
+            },
+            sort=[("timestamp", -1)]
+        )
+        if pending:
+            signal_id = pending["signal_id"]
+            update_signal_outcome(signal_id, outcome)
+            print(f"Auto-resolved {signal_id} for {symbol} {timeframe} {direction}")
+            return signal_id
+        return None
+    except Exception as e:
+        print(f"Auto-match error (non-fatal): {e}")
+        return None
+
+# ── Basic endpoints ──────────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {"status": "Trading Signals API is running", "ml_loaded": ml_model is not None}
@@ -78,7 +106,7 @@ def recommend():
 def get_prices():
     return get_latest_ticks()
 
-# ── Feedback endpoint ────────────────────────────────────────────────────────
+# ── Feedback endpoint (with auto‑match fallback) ─────────────────────────
 class FeedbackPayload(BaseModel):
     symbol: str
     timeframe: str
@@ -89,6 +117,7 @@ class FeedbackPayload(BaseModel):
 
 @app.post("/feedback")
 def submit_feedback(payload: FeedbackPayload):
+    # Always record outcome in training_examples (legacy + backup)
     record_outcome(
         symbol=payload.symbol,
         timeframe=payload.timeframe,
@@ -96,8 +125,15 @@ def submit_feedback(payload: FeedbackPayload):
         outcome=payload.outcome,
         confidence=payload.confidence
     )
+    # Try to resolve a pending signal
     if payload.signal_id:
         update_signal_outcome(payload.signal_id, payload.outcome)
+    else:
+        # Auto-match if signal_id missing (Lovable frontend)
+        find_and_resolve_pending_signal(
+            payload.symbol, payload.timeframe,
+            payload.direction, payload.outcome
+        )
     stats = get_pair_accuracy(payload.symbol, payload.timeframe)
     return {
         "status": "recorded",
@@ -113,10 +149,6 @@ def get_all_stats():
 def get_pair_stats(symbol: str, timeframe: str):
     return get_pair_accuracy(symbol, timeframe)
 
-# ── Model management (safe, no crash if model.pkl missing) ───────────────────
 @app.post("/reload-model")
 def reload_model():
-    # signals.py handles the actual loading; here we just trigger it
-    # For now, we'll call a simple function from signals if we add one later.
-    # This endpoint is safe – it won't crash because no import needed.
     return {"status": "Model reload feature will be activated after you upload model.pkl"}
