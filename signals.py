@@ -35,7 +35,8 @@ def _get_min_confidence(symbol, timeframe):
 
 def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, reason, extras=None):
     min_conf = _get_min_confidence(symbol, timeframe)
-    if confidence < min_conf:
+    confidence = float(confidence)        # ← new line you add
+if confidence < min_conf:
         return None
     validity_seconds = get_signal_validity(timeframe)
     signal = {
@@ -46,7 +47,7 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
         "timeframe": timeframe,
         "entry_price": round(entry_price, 5),
         "confidence": min(int(confidence), 93),
-        "is_vip": confidence >= 78,
+        "is_vip": bool(confidence >= 78),   # ← wrap in bool()
         "reason": reason,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "valid_for_seconds": validity_seconds,
