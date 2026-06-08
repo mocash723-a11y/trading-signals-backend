@@ -1,46 +1,47 @@
 """
 feedback.py — Trade Outcome Tracker + Persistent Storage
 ==========================================================
-Storage strategy:
-  PRIMARY:  MongoDB Atlas (free tier) — survives server restarts
-  FALLBACK: In-memory — works even if MongoDB is not connected yet
-
-MongoDB setup (one-time, free):
-  1. Go to mongodb.com/cloud/atlas → sign up free
-  2. Create a free cluster (M0 tier)
-  3. Database Access → Add user with password
-  4. Network Access → Allow access from anywhere (0.0.0.0/0)
-  5. Connect → Drivers → copy the connection string
-  6. In Render dashboard → Environment → add:
-     MONGO_URI = mongodb+srv://username:password@cluster.mongodb.net/trading_signals
-
-Until MONGO_URI is set, the system works in memory-only mode.
+FIXES:
+- Singleton MongoDB client (reused across calls)
+- Load adaptive thresholds from MongoDB on startup
+- TTL index for pending_signals (auto-delete old records)
 """
 
 from datetime import datetime, timezone
 from collections import defaultdict
 import os
+import atexit
 
 # ── In-memory storage (always works) ─────────────────────────────────────────
 outcomes: dict = defaultdict(lambda: defaultdict(list))
 DEFAULT_THRESHOLD = 62
 adaptive_thresholds: dict = defaultdict(lambda: defaultdict(lambda: DEFAULT_THRESHOLD))
 
-# ── MongoDB setup (graceful — won't crash if not configured) ──────────────────
+# ── Singleton MongoDB client (FIX #1 & #11) ─────────────────────────────────
 MONGO_URI = os.environ.get("MONGO_URI", "")
 DB_NAME = "trading_signals"
 COLL_PENDING = "pending_signals"
 COLL_TRAINING = "training_examples"
+COLL_THRESHOLDS = "adaptive_thresholds"
 
+_mongo_client = None
+_mongo_db = None
 _mongo_available = False
 
-def _get_db():
-    global _mongo_available
+def _get_mongo_client():
+    """Singleton MongoDB client - created once and reused."""
+    global _mongo_client, _mongo_db, _mongo_available
+    if _mongo_client is not None:
+        return _mongo_client, _mongo_db, _mongo_available
+    
     if not MONGO_URI or MONGO_URI == "your_mongodb_atlas_uri":
-        return None
+        print("MongoDB: No URI provided, using memory-only mode")
+        _mongo_available = False
+        return None, None, False
+    
     try:
         from pymongo import MongoClient
-        client = MongoClient(
+        _mongo_client = MongoClient(
             MONGO_URI,
             serverSelectionTimeoutMS=5000,
             connectTimeoutMS=5000,
@@ -48,13 +49,75 @@ def _get_db():
             tls=True,
             tlsAllowInvalidCertificates=True
         )
-        client.admin.command("ping")
+        # Test connection once at startup
+        _mongo_client.admin.command("ping")
+        _mongo_db = _mongo_client[DB_NAME]
         _mongo_available = True
-        return client[DB_NAME]
+        print("MongoDB connected successfully (singleton client)")
+        
+        # Setup TTL index for pending_signals (FIX #12)
+        try:
+            _mongo_db[COLL_PENDING].create_index("timestamp", expireAfterSeconds=604800)  # 7 days
+            print("TTL index on pending_signals created/verified")
+        except Exception as e:
+            print(f"TTL index warning: {e}")
+        
+        # Setup index for thresholds collection
+        try:
+            _mongo_db[COLL_THRESHOLDS].create_index([("symbol", 1), ("timeframe", 1)], unique=True)
+        except Exception as e:
+            pass
+            
     except Exception as e:
-        _mongo_available = False
         print(f"MongoDB not available: {e}")
-        return None
+        _mongo_available = False
+        _mongo_client = None
+        _mongo_db = None
+    
+    return _mongo_client, _mongo_db, _mongo_available
+
+def _get_db():
+    """Legacy wrapper - returns db or None."""
+    _, db, available = _get_mongo_client()
+    return db if available else None
+
+def load_adaptive_thresholds_from_mongo():
+    """Load saved thresholds from MongoDB on startup (FIX #3)."""
+    _, db, available = _get_mongo_client()
+    if not available or db is None:
+        print("No MongoDB - using default thresholds only")
+        return
+    
+    try:
+        collection = db[COLL_THRESHOLDS]
+        saved_thresholds = collection.find({})
+        count = 0
+        for doc in saved_thresholds:
+            symbol = doc.get("symbol")
+            timeframe = doc.get("timeframe")
+            threshold = doc.get("threshold", DEFAULT_THRESHOLD)
+            if symbol and timeframe:
+                adaptive_thresholds[symbol][timeframe] = threshold
+                count += 1
+        print(f"Loaded {count} adaptive thresholds from MongoDB")
+    except Exception as e:
+        print(f"Failed to load thresholds: {e}")
+
+def save_adaptive_threshold(symbol: str, timeframe: str, threshold: int):
+    """Save a threshold to MongoDB."""
+    _, db, available = _get_mongo_client()
+    if not available or db is None:
+        return
+    
+    try:
+        collection = db[COLL_THRESHOLDS]
+        collection.update_one(
+            {"symbol": symbol, "timeframe": timeframe},
+            {"$set": {"threshold": threshold, "updated_at": datetime.now(timezone.utc)}},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"Failed to save threshold: {e}")
 
 # ── Record trade outcome ──────────────────────────────────────────────────────
 
@@ -92,12 +155,17 @@ def _update_threshold(symbol: str, timeframe: str):
     wins = sum(1 for t in trades if t["outcome"] == "win")
     win_rate = (wins / len(trades)) * 100
     current = adaptive_thresholds[symbol][timeframe]
+    
     if win_rate < 45 and len(trades) >= 8:
-        adaptive_thresholds[symbol][timeframe] = min(current + 5, 82)
-        print(f"Raising threshold {symbol} {timeframe}: {current}→{adaptive_thresholds[symbol][timeframe]} (wr {win_rate:.1f}%)")
+        new_threshold = min(current + 5, 82)
+        adaptive_thresholds[symbol][timeframe] = new_threshold
+        save_adaptive_threshold(symbol, timeframe, new_threshold)  # Save to MongoDB
+        print(f"Raising threshold {symbol} {timeframe}: {current}→{new_threshold} (wr {win_rate:.1f}%)")
     elif win_rate > 72 and len(trades) >= 8:
-        adaptive_thresholds[symbol][timeframe] = max(current - 3, 55)
-        print(f"Lowering threshold {symbol} {timeframe}: {current}→{adaptive_thresholds[symbol][timeframe]} (wr {win_rate:.1f}%)")
+        new_threshold = max(current - 3, 55)
+        adaptive_thresholds[symbol][timeframe] = new_threshold
+        save_adaptive_threshold(symbol, timeframe, new_threshold)  # Save to MongoDB
+        print(f"Lowering threshold {symbol} {timeframe}: {current}→{new_threshold} (wr {win_rate:.1f}%)")
 
 def get_adaptive_threshold(symbol: str, timeframe: str) -> int:
     return adaptive_thresholds[symbol][timeframe]
@@ -174,6 +242,7 @@ def save_pending_signal(signal_id, symbol, timeframe, direction, confidence, ind
         db = _get_db()
         if db is not None:
             db[COLL_PENDING].insert_one(doc)
+            # No longer need to print on every save
     except Exception as e:
         print(f"Pending signal save error (non-fatal): {e}")
 
@@ -182,9 +251,11 @@ def update_signal_outcome(signal_id, outcome):
     try:
         db = _get_db()
         if db is not None:
-            db[COLL_PENDING].update_one(
+            result = db[COLL_PENDING].update_one(
                 {"signal_id": signal_id},
                 {"$set": {"outcome": outcome, "resolved_at": datetime.now(timezone.utc)}}
             )
+            if result.matched_count == 0:
+                print(f"Signal {signal_id} not found (already resolved or never saved)")
     except Exception as e:
         print(f"Update outcome error (non-fatal): {e}")
