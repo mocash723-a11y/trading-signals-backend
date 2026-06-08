@@ -259,3 +259,101 @@ def update_signal_outcome(signal_id, outcome):
                 print(f"Signal {signal_id} not found (already resolved or never saved)")
     except Exception as e:
         print(f"Update outcome error (non-fatal): {e}")
+        
+# Add these functions to your existing feedback.py
+
+def save_trade_from_recommendation(signal_id, symbol, timeframe, direction, 
+                                   entry_price, confidence, indicators, 
+                                   user_id="default"):
+    """Save a trade from recommendations tab for tracking."""
+    doc = {
+        "signal_id": signal_id,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "direction": direction,
+        "entry_price": entry_price,
+        "confidence": confidence,
+        "features": indicators,
+        "user_id": user_id,
+        "status": "open",
+        "saved_at": datetime.now(timezone.utc),
+        "closed_at": None,
+        "outcome": None
+    }
+    try:
+        db = _get_db()
+        if db is not None:
+            # Check if already saved to prevent duplicates
+            existing = db["saved_trades"].find_one({"signal_id": signal_id})
+            if existing:
+                return False
+            db["saved_trades"].insert_one(doc)
+            print(f"Trade saved from recommendation: {signal_id}")
+            return True
+    except Exception as e:
+        print(f"Save trade error: {e}")
+        return False
+
+def close_saved_trade(signal_id, outcome, actual_profit_pct=None):
+    """Record win/loss for a saved trade and update training data."""
+    try:
+        db = _get_db()
+        if db is None:
+            return False
+        
+        # Update saved_trades
+        result = db["saved_trades"].update_one(
+            {"signal_id": signal_id},
+            {
+                "$set": {
+                    "status": f"closed_{outcome}",
+                    "outcome": outcome,
+                    "closed_at": datetime.now(timezone.utc),
+                    "actual_profit_pct": actual_profit_pct
+                }
+            }
+        )
+        
+        if result.modified_count > 0:
+            # Also update the original pending_signal and training_examples
+            # This links the recommendation trade to your training system
+            update_signal_outcome(signal_id, outcome)
+            
+            # Get the full signal to record in training_examples
+            trade = db["saved_trades"].find_one({"signal_id": signal_id})
+            if trade:
+                record_outcome(
+                    symbol=trade["symbol"],
+                    timeframe=trade["timeframe"],
+                    direction=trade["direction"],
+                    outcome=outcome,
+                    confidence=trade["confidence"]
+                )
+            
+            print(f"Saved trade closed: {signal_id} -> {outcome}")
+            return True
+        return False
+    except Exception as e:
+        print(f"Close trade error: {e}")
+        return False
+
+def get_user_trades(user_id="default", status=None):
+    """Get all trades for a user."""
+    try:
+        db = _get_db()
+        if db is None:
+            return []
+        
+        query = {"user_id": user_id}
+        if status:
+            query["status"] = status
+        
+        trades = list(db["saved_trades"].find(
+            query, 
+            {"_id": 0}
+        ).sort("saved_at", -1))
+        
+        return trades
+    except Exception as e:
+        print(f"Get trades error: {e}")
+        return []
