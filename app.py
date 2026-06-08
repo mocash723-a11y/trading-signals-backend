@@ -159,3 +159,70 @@ def get_pair_stats(symbol: str, timeframe: str):
 @app.post("/reload-model")
 def reload_model():
     return {"status": "Model reload feature will be activated after you upload model.pkl"}
+
+# Add these new endpoints after your existing ones
+
+from pydantic import BaseModel
+from typing import Optional
+
+class SaveRecommendationTradePayload(BaseModel):
+    signal_id: str
+    symbol: str
+    timeframe: str
+    direction: str
+    entry_price: float
+    confidence: int
+    user_id: Optional[str] = "default"
+
+class CloseSavedTradePayload(BaseModel):
+    signal_id: str
+    outcome: str  # "win" or "loss"
+    actual_profit_pct: Optional[float] = None
+    user_id: Optional[str] = "default"
+
+@app.post("/saved-trades/save")
+def save_recommendation_trade(payload: SaveRecommendationTradePayload):
+    """Save a trade from recommendations tab."""
+    from feedback import save_trade_from_recommendation
+    
+    # Try to get indicators from the original signal
+    from signals import get_signal_for
+    signal = get_signal_for(payload.symbol, payload.timeframe)
+    indicators = signal.get("indicators", {}) if signal else {}
+    
+    success = save_trade_from_recommendation(
+        signal_id=payload.signal_id,
+        symbol=payload.symbol,
+        timeframe=payload.timeframe,
+        direction=payload.direction,
+        entry_price=payload.entry_price,
+        confidence=payload.confidence,
+        indicators=indicators,
+        user_id=payload.user_id
+    )
+    
+    if success:
+        return {"status": "saved", "message": "Trade saved! Record outcome when position closes."}
+    return {"status": "error", "message": "Trade already saved or failed"}
+
+@app.post("/saved-trades/close")
+def close_saved_trade(payload: CloseSavedTradePayload):
+    """Record win/loss for a saved trade."""
+    from feedback import close_saved_trade
+    
+    success = close_saved_trade(
+        signal_id=payload.signal_id,
+        outcome=payload.outcome,
+        actual_profit_pct=payload.actual_profit_pct
+    )
+    
+    if success:
+        return {"status": "recorded", "message": f"Trade recorded as {payload.outcome.upper()}! Training data updated."}
+    return {"status": "error", "message": "Failed to record outcome"}
+
+@app.get("/saved-trades")
+def get_saved_trades(user_id: str = "default", status: Optional[str] = None):
+    """Get all saved trades for a user."""
+    from feedback import get_user_trades
+    trades = get_user_trades(user_id, status)
+    return {"trades": trades, "count": len(trades)}
