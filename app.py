@@ -10,19 +10,27 @@ from signals import (
     generate_signals, get_all_signals,
     get_signal_for, get_recommendations, ml_model
 )
-from feedback import record_outcome, get_stats, get_pair_accuracy, update_signal_outcome
+from feedback import record_outcome, get_stats, get_pair_accuracy, update_signal_outcome, load_adaptive_thresholds_from_mongo
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Load saved thresholds from MongoDB on startup (FIX #3)
+    load_adaptive_thresholds_from_mongo()
+    
+    # Start background tasks
     asyncio.create_task(start_feed())
     asyncio.create_task(signal_loop())
     yield
 
 app = FastAPI(title="Trading Signals API", lifespan=lifespan)
 
+# FIX #10: Lock CORS to your frontend domain in production
+# Change this to your actual Lovable frontend URL when deployed
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "*")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[FRONTEND_URL] if FRONTEND_URL != "*" else ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -39,12 +47,11 @@ async def signal_loop():
 def find_and_resolve_pending_signal(symbol: str, timeframe: str, direction: str, outcome: str):
     """If frontend doesn't send signal_id, match the most recent pending signal."""
     try:
-        from pymongo import MongoClient
-        MONGO_URI = os.environ.get("MONGO_URI", "")
-        if not MONGO_URI:
+        from feedback import _get_db  # Use the same singleton connection
+        db = _get_db()
+        if db is None:
             return None
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-        db = client["trading_signals"]
+        
         # Find newest pending signal for same symbol, timeframe, direction
         pending = db.pending_signals.find_one(
             {
