@@ -15,6 +15,7 @@ from feedback import get_adaptive_threshold, save_pending_signal
 # ── AI Model Loading ─────────────────────────────────────────────────────────
 import joblib
 import os
+import time  # For signal caching (FIX #4)
 
 ml_model = None
 if os.path.exists("model.pkl"):
@@ -26,7 +27,25 @@ if os.path.exists("model.pkl"):
 else:
     print("No model.pkl found — using rule-based confidence only.")
 
+# Signal cache with timestamps (FIX #4 - prevent overwriting signals mid-validity)
 current_signals = {}
+signal_generation_times = {}  # Track when each signal was generated
+
+def _is_signal_fresh(symbol, timeframe):
+    """Check if existing signal is still valid."""
+    cache_key = f"{symbol}_{timeframe}"
+    if cache_key not in current_signals:
+        return False
+    existing = current_signals[cache_key]
+    valid_until = existing.get("valid_until")
+    if not valid_until:
+        return False
+    # Parse ISO timestamp to datetime
+    try:
+        valid_until_dt = datetime.fromisoformat(valid_until.replace('Z', '+00:00'))
+        return datetime.now(timezone.utc) < valid_until_dt
+    except:
+        return False
 
 def _get_min_confidence(symbol, timeframe):
     pair_default = get_pair_min_confidence(symbol)
@@ -34,9 +53,14 @@ def _get_min_confidence(symbol, timeframe):
     return max(pair_default, adaptive)
 
 def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, reason, extras=None):
-    confidence = float(confidence)                # ← FIX: convert to native float
+    confidence = float(confidence)
+    
+    # FIX #2: Remove hard cap at 93 - keep original confidence
+    # Just round to nearest integer for display, but keep full value internally
+    confidence_int = int(round(confidence))
+    
     min_conf = _get_min_confidence(symbol, timeframe)
-    if confidence < min_conf:
+    if confidence_int < min_conf:
         return None
     validity_seconds = get_signal_validity(timeframe)
     signal = {
@@ -46,8 +70,8 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
         "direction": direction,
         "timeframe": timeframe,
         "entry_price": round(entry_price, 5),
-        "confidence": min(int(confidence), 93),
-        "is_vip": bool(confidence >= 78),         # ← FIX: native bool
+        "confidence": confidence_int,  # Now can go above 93!
+        "is_vip": bool(confidence >= 78),
         "reason": reason,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "valid_for_seconds": validity_seconds,
@@ -60,11 +84,14 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
     return signal
 
 def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles_1m=None):
-    confidence = float(base_confidence)          # ← FIX: convert to native float
-    mtf = multi_timeframe_confirm(prices, direction)
+    confidence = float(base_confidence)
+    
+    # Use proper multi-timeframe confirmation (now fixed in indicators.py)
+    mtf = multi_timeframe_confirm(symbol, direction)  # Updated to use proper MTF
     if mtf["confirmed"]:
         confidence += mtf["bonus"]
         reasons.append(f"Multi-TF confirmed ({mtf['agreement']} agree)")
+    
     if candles_1m and len(candles_1m) >= 2:
         candle = detect_candle_patterns_from_ohlc(candles_1m)
     else:
@@ -72,12 +99,14 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
     if candle and candle["bias"] == direction and candle["bonus"] > 0:
         confidence += candle["bonus"]
         reasons.append(f"{candle['pattern']} detected")
+    
     session = session_quality(symbol)
     confidence *= session["multiplier"]
     if session["quality"] == "excellent":
         reasons.append("Peak session")
     elif session["quality"] == "poor":
         reasons.append("Low liquidity")
+    
     if not symbol.startswith("cry") and candles_1m and len(candles_1m) >= 15:
         highs  = [c["high"]  for c in candles_1m[-15:]]
         lows   = [c["low"]   for c in candles_1m[-15:]]
@@ -89,14 +118,10 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
     return confidence
 
 def _session_allows_signal(symbol):
-    # Allow Forex & Crypto 24/5 (Monday to Friday)
-    # Gold also allowed 24/5 (Deriv provides quotes even outside "official" gold hours)
-    # Weekend check: if you want to block Saturday/Sunday entirely, keep the weekday check
     from datetime import datetime
-    weekday = datetime.utcnow().weekday()  # 0=Monday, 6=Sunday
-    if weekday >= 5:  # Saturday or Sunday
-        return False   # No forex/gold signals on weekends (Deriv has very wide spreads)
-    # Otherwise always allow – no dead zone restriction
+    weekday = datetime.utcnow().weekday()
+    if weekday >= 5:
+        return False
     return True
 
 def ml_confidence(symbol, timeframe, direction, prices):
@@ -122,6 +147,10 @@ def ml_confidence(symbol, timeframe, direction, prices):
 # ── Timeframe strategies ────────────────────────────────────────────────
 
 def signal_5s(symbol, name, prices):
+    # FIX #4: Check if we already have a valid signal
+    if _is_signal_fresh(symbol, "5s"):
+        return current_signals.get(f"{symbol}_5s")
+    
     if symbol == "cryBTCUSD" or symbol in GOLD_EXCLUDED_TIMEFRAMES or symbol == "frxXAUUSD":
         return None
     if not _session_allows_signal(symbol):
@@ -131,8 +160,12 @@ def signal_5s(symbol, name, prices):
     momentum = tick_momentum(prices, lookback=15)
     if not momentum or momentum["strength"] < 68 or momentum["consecutive"] < 5:
         return None
-    direction = momentum["direction"]
-    reasons = [f"{momentum['consecutive']} consecutive {direction} ticks"]
+    
+    # FIX #5: Convert "UP"/"DOWN" to "BUY"/"SELL"
+    raw_direction = momentum["direction"]
+    direction = "BUY" if raw_direction == "UP" else "SELL"
+    
+    reasons = [f"{momentum['consecutive']} consecutive {raw_direction} ticks"]
     base_conf = momentum["strength"] * 0.85
     ml_conf = ml_confidence(symbol, "5s", direction, prices)
     base_conf = ml_conf if ml_conf else base_conf
@@ -140,6 +173,7 @@ def signal_5s(symbol, name, prices):
     confidence = _apply_boosters(symbol, prices, direction, base_conf, reasons, candles)
     signal = _build_signal(symbol, name, direction, "5s", confidence, prices[-1], " | ".join(reasons))
     if signal:
+        # FIX #9: Better error handling - don't use bare except
         try:
             indicators = {
                 "rsi7": rsi(prices, 7) or 50,
@@ -150,11 +184,15 @@ def signal_5s(symbol, name, prices):
                 "direction_encoded": 1 if direction == "BUY" else 0
             }
             save_pending_signal(signal["id"], symbol, "5s", direction, confidence, indicators)
-        except:
-            pass
+        except Exception as e:
+            print(f"Failed to save pending signal for {symbol} 5s: {e}")
     return signal
 
 def signal_1min(symbol, name, prices):
+    # FIX #4: Check if we already have a valid signal
+    if _is_signal_fresh(symbol, "1min"):
+        return current_signals.get(f"{symbol}_1min")
+    
     if symbol == "cryBTCUSD" or symbol == "frxXAUUSD":
         return None
     if not _session_allows_signal(symbol):
@@ -195,11 +233,15 @@ def signal_1min(symbol, name, prices):
                 "direction_encoded": 1 if direction == "BUY" else 0
             }
             save_pending_signal(signal["id"], symbol, "1min", direction, confidence, indicators)
-        except:
-            pass
+        except Exception as e:
+            print(f"Failed to save pending signal for {symbol} 1min: {e}")
     return signal
 
 def signal_3min(symbol, name, prices):
+    # FIX #4: Check if we already have a valid signal
+    if _is_signal_fresh(symbol, "3min"):
+        return current_signals.get(f"{symbol}_3min")
+    
     if symbol == "cryBTCUSD":
         return None
     if not _session_allows_signal(symbol):
@@ -240,12 +282,16 @@ def signal_3min(symbol, name, prices):
                         "direction_encoded": 1 if direction == "BUY" else 0
                     }
                     save_pending_signal(signal["id"], symbol, "3min", direction, confidence, indicators)
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Failed to save pending signal for {symbol} 3min: {e}")
             return signal
     return None
 
 def signal_5min(symbol, name, prices):
+    # FIX #4: Check if we already have a valid signal
+    if _is_signal_fresh(symbol, "5min"):
+        return current_signals.get(f"{symbol}_5min")
+    
     if not _session_allows_signal(symbol):
         return None
     if len(prices) < 260:
@@ -284,8 +330,8 @@ def signal_5min(symbol, name, prices):
                         "direction_encoded": 1 if direction == "BUY" else 0
                     }
                     save_pending_signal(signal["id"], symbol, "5min", direction, confidence, indicators)
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Failed to save pending signal for {symbol} 5min: {e}")
             return signal
     return None
 
@@ -306,13 +352,26 @@ def generate_signals():
                 signal = fn(symbol, name, prices)
                 if signal:
                     current_signals[f"{symbol}_{tf}"] = signal
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Signal generation error for {symbol} {tf}: {e}")
 
 def get_all_signals():
-    signals = list(current_signals.values())
-    signals.sort(key=lambda s: (s["is_vip"], s["confidence"]), reverse=True)
-    return signals
+    # Filter out expired signals before returning (FIX #4)
+    valid_signals = []
+    for signal in current_signals.values():
+        valid_until = signal.get("valid_until")
+        if valid_until:
+            try:
+                valid_until_dt = datetime.fromisoformat(valid_until.replace('Z', '+00:00'))
+                if datetime.now(timezone.utc) <= valid_until_dt:
+                    valid_signals.append(signal)
+            except:
+                valid_signals.append(signal)
+        else:
+            valid_signals.append(signal)
+    
+    valid_signals.sort(key=lambda s: (s["is_vip"], s["confidence"]), reverse=True)
+    return valid_signals
 
 def get_signal_for(symbol, timeframe):
     name = get_all_symbols().get(symbol, symbol)
@@ -326,12 +385,22 @@ def get_signal_for(symbol, timeframe):
     if fresh:
         current_signals[f"{symbol}_{timeframe}"] = fresh
         return fresh
-    return current_signals.get(f"{symbol}_{timeframe}")
+    # Check if existing signal is still valid (FIX #4)
+    existing = current_signals.get(f"{symbol}_{timeframe}")
+    if existing:
+        valid_until = existing.get("valid_until")
+        if valid_until:
+            try:
+                valid_until_dt = datetime.fromisoformat(valid_until.replace('Z', '+00:00'))
+                if datetime.now(timezone.utc) <= valid_until_dt:
+                    return existing
+            except:
+                return existing
+    return None
 
 def get_recommendations():
     all_sigs = get_all_signals()
     session = is_forex_session()
-# No longer block signals based on dead_zone
     if not all_sigs:
         return {
             "status": "loading",
@@ -380,4 +449,4 @@ def _explain(sig, session):
         f"Valid for {validity} seconds — act quickly. "
         f"Market: {session['note']}. "
         f"Indicators: {sig['reason']}."
-    )
+            )
