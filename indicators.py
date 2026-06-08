@@ -21,6 +21,7 @@ def ema_series(prices, period):
     return result
 
 def rsi(prices, period=14):
+    """FIX #8: Use Wilder's smoothing (RMA) like TradingView."""
     if len(prices) < period + 1:
         return None
     recent = prices[-(period + 1):]
@@ -29,11 +30,20 @@ def rsi(prices, period=14):
         change = recent[i] - recent[i-1]
         gains.append(max(change, 0))
         losses.append(max(-change, 0))
+    
+    # Wilder's smoothing: first avg is simple, then smoothed
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
+    
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    
     if avg_loss == 0:
         return 100.0
-    return round(100 - (100 / (1 + avg_gain / avg_loss)), 2)
+    rs = avg_gain / avg_loss
+    rsi_val = 100 - (100 / (1 + rs))
+    return round(rsi_val, 2)
 
 def macd(prices, fast=12, slow=26, signal=9):
     if len(prices) < slow + signal:
@@ -83,14 +93,35 @@ def bollinger_bands(prices, period=20, std_dev=2.0):
     }
 
 def stochastic(prices, period=14):
-    if len(prices) < period:
+    """FIX #7: Add %D line (3-period SMA of %K)."""
+    if len(prices) < period + 3:  # Need extra for %D calculation
         return None
     recent = prices[-period:]
     highest, lowest = max(recent), min(recent)
     if highest == lowest:
         return None
-    k = ((prices[-1] - lowest) / (highest - lowest)) * 100
-    return {"k": round(k, 2), "overbought": k > 80, "oversold": k < 20}
+    k_raw = ((prices[-1] - lowest) / (highest - lowest)) * 100
+    k = round(k_raw, 2)
+    
+    # Calculate %D (3-period SMA of %K)
+    k_values = []
+    for i in range(3):
+        window = prices[-(period + i):-i] if i > 0 else prices[-period:]
+        if len(window) >= period:
+            h = max(window)
+            l = min(window)
+            if h != l:
+                k_prev = ((window[-1] - l) / (h - l)) * 100
+                k_values.append(k_prev)
+    
+    d = round(sum(k_values) / len(k_values), 2) if k_values else k
+    
+    return {
+        "k": k,
+        "d": d,
+        "overbought": k > 80 and d > 80,  # Both must confirm
+        "oversold": k < 20 and d < 20     # Both must confirm
+    }
 
 def tick_momentum(prices, lookback=10):
     if len(prices) < lookback:
@@ -115,27 +146,62 @@ def tick_momentum(prices, lookback=10):
         "price_change": round(recent[-1] - recent[0], 5)
     }
 
-def multi_timeframe_confirm(prices, direction):
-    if len(prices) < 200:
-        return {"confirmed": False, "bonus": 0, "agreement": "0/3"}
+def multi_timeframe_confirm(symbol, direction):
+    """
+    FIX #6: Use actual different timeframes, not just sliced RSI.
+    Gets real 1min, 3min, 5min data from the candle builders.
+    """
+    from feed import get_closed_candles
+    
     confirmations = 0
-    short_rsi = rsi(prices[-60:], period=7)
-    if short_rsi:
-        if direction == "BUY" and short_rsi < 50: confirmations += 1
-        elif direction == "SELL" and short_rsi > 50: confirmations += 1
-    medium_rsi = rsi(prices[-120:], period=10)
-    if medium_rsi:
-        if direction == "BUY" and medium_rsi < 52: confirmations += 1
-        elif direction == "SELL" and medium_rsi > 48: confirmations += 1
-    long_rsi = rsi(prices[-240:], period=14)
-    if long_rsi:
-        if direction == "BUY" and long_rsi < 55: confirmations += 1
-        elif direction == "SELL" and long_rsi > 45: confirmations += 1
+    agreement_count = 0
+    
+    # Get actual timeframe candles
+    candles_1m = get_closed_candles(symbol)
+    
+    if candles_1m and len(candles_1m) >= 10:
+        # 1-minute timeframe analysis
+        closes_1m = [c["close"] for c in candles_1m[-10:]]
+        rsi_1m = rsi(closes_1m, period=7)
+        if rsi_1m:
+            if direction == "BUY" and rsi_1m < 50:
+                confirmations += 1
+                agreement_count += 1
+            elif direction == "SELL" and rsi_1m > 50:
+                confirmations += 1
+                agreement_count += 1
+        
+        # 3-minute timeframe (use every 3rd candle or aggregate)
+        if len(candles_1m) >= 30:
+            closes_3m = [c["close"] for c in candles_1m[-30:] if c]
+            if len(closes_3m) >= 10:
+                rsi_3m = rsi(closes_3m[::3], period=7)  # Sample every 3rd candle
+                if rsi_3m:
+                    if direction == "BUY" and rsi_3m < 52:
+                        confirmations += 1
+                        agreement_count += 1
+                    elif direction == "SELL" and rsi_3m > 48:
+                        confirmations += 1
+                        agreement_count += 1
+        
+        # 5-minute timeframe
+        if len(candles_1m) >= 50:
+            closes_5m = [c["close"] for c in candles_1m[-50:] if c]
+            if len(closes_5m) >= 10:
+                rsi_5m = rsi(closes_5m[::5], period=10)  # Sample every 5th candle
+                if rsi_5m:
+                    if direction == "BUY" and rsi_5m < 55:
+                        confirmations += 1
+                        agreement_count += 1
+                    elif direction == "SELL" and rsi_5m > 45:
+                        confirmations += 1
+                        agreement_count += 1
+    
     bonus = {0: 0, 1: 0, 2: 10, 3: 20}.get(confirmations, 0)
     return {
         "confirmed": confirmations >= 2,
         "bonus": bonus,
-        "agreement": f"{confirmations}/3"
+        "agreement": f"{agreement_count}/3"
     }
 
 def session_quality(symbol):
