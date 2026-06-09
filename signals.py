@@ -119,9 +119,16 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
 
 def _session_allows_signal(symbol):
     from datetime import datetime
-    weekday = datetime.utcnow().weekday()
-    if weekday >= 5:
+    weekday = datetime.utcnow().weekday()  # 0=Monday, 6=Sunday
+    
+    # Crypto works 24/7 including weekends
+    if symbol.startswith("cry"):
+        return True
+    
+    # Forex & Gold only Monday-Friday
+    if weekday >= 5:  # Saturday or Sunday
         return False
+    
     return True
 
 def ml_confidence(symbol, timeframe, direction, prices):
