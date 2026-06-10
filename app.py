@@ -183,23 +183,48 @@ class CloseSavedTradePayload(BaseModel):
 @app.post("/saved-trades/save")
 def save_recommendation_trade(payload: SaveRecommendationTradePayload):
     """Save a trade from recommendations tab with full indicator data."""
-    from feedback import save_trade_from_recommendation
+    from feedback import save_trade_from_recommendation, _get_db
     from signals import current_signals
     
-    # Try to get indicators from the cached signal (recommendations tab)
     indicators = {}
+    
+    # FIRST: Try to get indicators from memory (fastest)
     cache_key = f"{payload.symbol}_{payload.timeframe}"
     
     if cache_key in current_signals:
         signal = current_signals[cache_key]
-        # The indicators are stored in the signal's 'indicators' field
         if "indicators" in signal:
             indicators = signal["indicators"]
-            print(f"Found indicators for {cache_key}: {list(indicators.keys())}")
-        else:
-            print(f"Warning: No indicators found in cached signal for {cache_key}")
-    else:
-        print(f"Warning: No cached signal found for {cache_key}")
+            print(f"✅ Found indicators in memory for {cache_key}")
+    
+    # SECOND (FALLBACK): If not in memory, search MongoDB pending_signals
+    if not indicators:
+        print(f"⚠️ Signal not in memory, searching MongoDB for {cache_key}")
+        try:
+            db = _get_db()
+            if db is not None:
+                # Find the most recent pending signal for this symbol/timeframe/direction
+                pending = db["pending_signals"].find_one(
+                    {
+                        "symbol": payload.symbol,
+                        "timeframe": payload.timeframe,
+                        "direction": payload.direction,
+                        "outcome": "pending"  # Only unresolved signals
+                    },
+                    sort=[("timestamp", -1)]  # Most recent first
+                )
+                
+                if pending and "features" in pending:
+                    indicators = pending["features"]
+                    print(f"✅ Found indicators in MongoDB pending_signals for {cache_key}")
+                else:
+                    print(f"❌ No pending signal found in MongoDB for {cache_key}")
+        except Exception as e:
+            print(f"Fallback MongoDB search error: {e}")
+    
+    # THIRD: Log if still no indicators found
+    if not indicators:
+        print(f"⚠️ WARNING: No indicators found for {cache_key} - AI training will be incomplete for this trade")
     
     success = save_trade_from_recommendation(
         signal_id=payload.signal_id,
@@ -208,18 +233,19 @@ def save_recommendation_trade(payload: SaveRecommendationTradePayload):
         direction=payload.direction,
         entry_price=payload.entry_price,
         confidence=payload.confidence,
-        indicators=indicators,  # Now passing the actual indicators!
+        indicators=indicators,
         user_id=payload.user_id
     )
     
     if success:
         return {
             "status": "saved", 
-            "message": "Trade saved with indicator data! Record outcome when position closes.",
-            "indicators_saved": len(indicators) > 0
+            "message": "Trade saved!",
+            "indicators_found": len(indicators) > 0,
+            "source": "memory" if cache_key in current_signals else "mongodb" if indicators else "none"
         }
     return {"status": "error", "message": "Trade already saved or failed"}
-
+    
 @app.post("/saved-trades/close")
 def close_saved_trade(payload: CloseSavedTradePayload):
     """Record win/loss for a saved trade."""
