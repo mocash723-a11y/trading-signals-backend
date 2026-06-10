@@ -15,7 +15,6 @@ from feedback import get_adaptive_threshold, save_pending_signal
 # ── AI Model Loading ─────────────────────────────────────────────────────────
 import joblib
 import os
-import time  # For signal caching (FIX #4)
 
 ml_model = None
 if os.path.exists("model.pkl"):
@@ -27,9 +26,8 @@ if os.path.exists("model.pkl"):
 else:
     print("No model.pkl found — using rule-based confidence only.")
 
-# Signal cache with timestamps (FIX #4 - prevent overwriting signals mid-validity)
+# Signal cache with timestamps
 current_signals = {}
-signal_generation_times = {}  # Track when each signal was generated
 
 def _is_signal_fresh(symbol, timeframe):
     """Check if existing signal is still valid."""
@@ -40,7 +38,6 @@ def _is_signal_fresh(symbol, timeframe):
     valid_until = existing.get("valid_until")
     if not valid_until:
         return False
-    # Parse ISO timestamp to datetime
     try:
         valid_until_dt = datetime.fromisoformat(valid_until.replace('Z', '+00:00'))
         return datetime.now(timezone.utc) < valid_until_dt
@@ -54,9 +51,6 @@ def _get_min_confidence(symbol, timeframe):
 
 def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, reason, extras=None):
     confidence = float(confidence)
-    
-    # FIX #2: Remove hard cap at 93 - keep original confidence
-    # Just round to nearest integer for display, but keep full value internally
     confidence_int = int(round(confidence))
     
     min_conf = _get_min_confidence(symbol, timeframe)
@@ -70,7 +64,7 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
         "direction": direction,
         "timeframe": timeframe,
         "entry_price": round(entry_price, 5),
-        "confidence": confidence_int,  # Now can go above 93!
+        "confidence": confidence_int,
         "is_vip": bool(confidence >= 78),
         "reason": reason,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -85,13 +79,10 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
 
 def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles_1m=None):
     confidence = float(base_confidence)
-    
-    # Use proper multi-timeframe confirmation (now fixed in indicators.py)
-    mtf = multi_timeframe_confirm(symbol, direction)  # Updated to use proper MTF
+    mtf = multi_timeframe_confirm(symbol, direction)
     if mtf["confirmed"]:
         confidence += mtf["bonus"]
         reasons.append(f"Multi-TF confirmed ({mtf['agreement']} agree)")
-    
     if candles_1m and len(candles_1m) >= 2:
         candle = detect_candle_patterns_from_ohlc(candles_1m)
     else:
@@ -99,14 +90,12 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
     if candle and candle["bias"] == direction and candle["bonus"] > 0:
         confidence += candle["bonus"]
         reasons.append(f"{candle['pattern']} detected")
-    
     session = session_quality(symbol)
     confidence *= session["multiplier"]
     if session["quality"] == "excellent":
         reasons.append("Peak session")
     elif session["quality"] == "poor":
         reasons.append("Low liquidity")
-    
     if not symbol.startswith("cry") and candles_1m and len(candles_1m) >= 15:
         highs  = [c["high"]  for c in candles_1m[-15:]]
         lows   = [c["low"]   for c in candles_1m[-15:]]
@@ -119,16 +108,11 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
 
 def _session_allows_signal(symbol):
     from datetime import datetime
-    weekday = datetime.utcnow().weekday()  # 0=Monday, 6=Sunday
-    
-    # Crypto works 24/7 including weekends
+    weekday = datetime.utcnow().weekday()
     if symbol.startswith("cry"):
         return True
-    
-    # Forex & Gold only Monday-Friday
-    if weekday >= 5:  # Saturday or Sunday
+    if weekday >= 5:
         return False
-    
     return True
 
 def ml_confidence(symbol, timeframe, direction, prices):
@@ -154,7 +138,6 @@ def ml_confidence(symbol, timeframe, direction, prices):
 # ── Timeframe strategies ────────────────────────────────────────────────
 
 def signal_5s(symbol, name, prices):
-    # FIX #4: Check if we already have a valid signal
     if _is_signal_fresh(symbol, "5s"):
         return current_signals.get(f"{symbol}_5s")
     
@@ -168,7 +151,6 @@ def signal_5s(symbol, name, prices):
     if not momentum or momentum["strength"] < 68 or momentum["consecutive"] < 5:
         return None
     
-    # FIX #5: Convert "UP"/"DOWN" to "BUY"/"SELL"
     raw_direction = momentum["direction"]
     direction = "BUY" if raw_direction == "UP" else "SELL"
     
@@ -178,25 +160,26 @@ def signal_5s(symbol, name, prices):
     base_conf = ml_conf if ml_conf else base_conf
     candles = get_closed_candles(symbol)
     confidence = _apply_boosters(symbol, prices, direction, base_conf, reasons, candles)
-    signal = _build_signal(symbol, name, direction, "5s", confidence, prices[-1], " | ".join(reasons))
+    
+    # Build indicators FIRST
+    indicators = {
+        "rsi7": rsi(prices, 7) or 50,
+        "rsi14": rsi(prices, 14) or 50,
+        "macd_line": macd(prices, 12, 26, 9)["macd_line"] if macd(prices, 12, 26, 9) else 0,
+        "stoch_k": stochastic(prices, 14)["k"] if stochastic(prices, 14) else 50,
+        "bb_percent_b": bollinger_bands(prices, 20, 2.0)["percent_b"] if bollinger_bands(prices, 20, 2.0) else 0.5,
+        "direction_encoded": 1 if direction == "BUY" else 0
+    }
+    
+    signal = _build_signal(symbol, name, direction, "5s", confidence, prices[-1], " | ".join(reasons), extras={"indicators": indicators})
     if signal:
-        # FIX #9: Better error handling - don't use bare except
         try:
-            indicators = {
-                "rsi7": rsi(prices, 7) or 50,
-                "rsi14": rsi(prices, 14) or 50,
-                "macd_line": macd(prices, 12, 26, 9)["macd_line"] if macd(prices, 12, 26, 9) else 0,
-                "stoch_k": stochastic(prices, 14)["k"] if stochastic(prices, 14) else 50,
-                "bb_percent_b": bollinger_bands(prices, 20, 2.0)["percent_b"] if bollinger_bands(prices, 20, 2.0) else 0.5,
-                "direction_encoded": 1 if direction == "BUY" else 0
-            }
             save_pending_signal(signal["id"], symbol, "5s", direction, confidence, indicators)
         except Exception as e:
             print(f"Failed to save pending signal for {symbol} 5s: {e}")
     return signal
 
 def signal_1min(symbol, name, prices):
-    # FIX #4: Check if we already have a valid signal
     if _is_signal_fresh(symbol, "1min"):
         return current_signals.get(f"{symbol}_1min")
     
@@ -228,24 +211,26 @@ def signal_1min(symbol, name, prices):
     base = ml_conf if ml_conf else base
     candles = get_closed_candles(symbol)
     confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
-    signal = _build_signal(symbol, name, direction, "1min", confidence, prices[-1], " | ".join(reasons))
+    
+    # Build indicators FIRST
+    indicators = {
+        "rsi7": rsi_val,
+        "rsi14": rsi(sample, 14) or 50,
+        "macd_line": macd(sample, 12, 26, 9)["macd_line"] if macd(sample, 12, 26, 9) else 0,
+        "stoch_k": stochastic(sample, 14)["k"] if stochastic(sample, 14) else 50,
+        "bb_percent_b": bollinger_bands(sample, 20, 2.0)["percent_b"] if bollinger_bands(sample, 20, 2.0) else 0.5,
+        "direction_encoded": 1 if direction == "BUY" else 0
+    }
+    
+    signal = _build_signal(symbol, name, direction, "1min", confidence, prices[-1], " | ".join(reasons), extras={"indicators": indicators})
     if signal:
         try:
-            indicators = {
-                "rsi7": rsi_val,
-                "rsi14": rsi(sample, 14) or 50,
-                "macd_line": macd(sample, 12, 26, 9)["macd_line"] if macd(sample, 12, 26, 9) else 0,
-                "stoch_k": stochastic(sample, 14)["k"] if stochastic(sample, 14) else 50,
-                "bb_percent_b": bollinger_bands(sample, 20, 2.0)["percent_b"] if bollinger_bands(sample, 20, 2.0) else 0.5,
-                "direction_encoded": 1 if direction == "BUY" else 0
-            }
             save_pending_signal(signal["id"], symbol, "1min", direction, confidence, indicators)
         except Exception as e:
             print(f"Failed to save pending signal for {symbol} 1min: {e}")
     return signal
 
 def signal_3min(symbol, name, prices):
-    # FIX #4: Check if we already have a valid signal
     if _is_signal_fresh(symbol, "3min"):
         return current_signals.get(f"{symbol}_3min")
     
@@ -270,6 +255,7 @@ def signal_3min(symbol, name, prices):
     elif macd_val["histogram"] < 0: bear += 1
     if stoch["oversold"]:    bull += 1; reasons.append("Stochastic oversold")
     elif stoch["overbought"]: bear += 1; reasons.append("Stochastic overbought")
+    
     for direction, score in [("BUY", bull), ("SELL", bear)]:
         if score >= 2:
             base = 63 + score * 7
@@ -277,17 +263,20 @@ def signal_3min(symbol, name, prices):
             base = ml_conf if ml_conf else base
             candles = get_closed_candles(symbol)
             confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
-            signal = _build_signal(symbol, name, direction, "3min", confidence, prices[-1], " | ".join(reasons))
+            
+            # Build indicators FIRST
+            indicators = {
+                "rsi7": rsi(sample, 7) or 50,
+                "rsi14": rsi_val,
+                "macd_line": macd_val["macd_line"],
+                "stoch_k": stoch["k"],
+                "bb_percent_b": bollinger_bands(sample, 20, 2.0)["percent_b"] if bollinger_bands(sample, 20, 2.0) else 0.5,
+                "direction_encoded": 1 if direction == "BUY" else 0
+            }
+            
+            signal = _build_signal(symbol, name, direction, "3min", confidence, prices[-1], " | ".join(reasons), extras={"indicators": indicators})
             if signal:
                 try:
-                    indicators = {
-                        "rsi7": rsi(sample, 7) or 50,
-                        "rsi14": rsi_val,
-                        "macd_line": macd_val["macd_line"],
-                        "stoch_k": stoch["k"],
-                        "bb_percent_b": bollinger_bands(sample, 20, 2.0)["percent_b"] if bollinger_bands(sample, 20, 2.0) else 0.5,
-                        "direction_encoded": 1 if direction == "BUY" else 0
-                    }
                     save_pending_signal(signal["id"], symbol, "3min", direction, confidence, indicators)
                 except Exception as e:
                     print(f"Failed to save pending signal for {symbol} 3min: {e}")
@@ -295,7 +284,6 @@ def signal_3min(symbol, name, prices):
     return None
 
 def signal_5min(symbol, name, prices):
-    # FIX #4: Check if we already have a valid signal
     if _is_signal_fresh(symbol, "5min"):
         return current_signals.get(f"{symbol}_5min")
     
@@ -318,6 +306,7 @@ def signal_5min(symbol, name, prices):
     elif macd_val["histogram"] > 0:      bull += 1; reasons.append("MACD positive")
     elif macd_val["cross"] == "bearish": bear += 2; reasons.append("MACD bearish cross")
     elif macd_val["histogram"] < 0:      bear += 1; reasons.append("MACD negative")
+    
     for direction, score in [("BUY", bull), ("SELL", bear)]:
         if score >= 3:
             base = 68 + min(score * 5, 18)
@@ -325,17 +314,20 @@ def signal_5min(symbol, name, prices):
             base = ml_conf if ml_conf else base
             candles = get_closed_candles(symbol)
             confidence = _apply_boosters(symbol, prices, direction, base, reasons, candles)
-            signal = _build_signal(symbol, name, direction, "5min", confidence, prices[-1], " | ".join(reasons))
+            
+            # Build indicators FIRST
+            indicators = {
+                "rsi7": rsi(sample, 7) or 50,
+                "rsi14": rsi_val,
+                "macd_line": macd_val["macd_line"],
+                "stoch_k": stochastic(sample, 14)["k"] if stochastic(sample, 14) else 50,
+                "bb_percent_b": bb["percent_b"],
+                "direction_encoded": 1 if direction == "BUY" else 0
+            }
+            
+            signal = _build_signal(symbol, name, direction, "5min", confidence, prices[-1], " | ".join(reasons), extras={"indicators": indicators})
             if signal:
                 try:
-                    indicators = {
-                        "rsi7": rsi(sample, 7) or 50,
-                        "rsi14": rsi_val,
-                        "macd_line": macd_val["macd_line"],
-                        "stoch_k": stochastic(sample, 14)["k"] if stochastic(sample, 14) else 50,
-                        "bb_percent_b": bb["percent_b"],
-                        "direction_encoded": 1 if direction == "BUY" else 0
-                    }
                     save_pending_signal(signal["id"], symbol, "5min", direction, confidence, indicators)
                 except Exception as e:
                     print(f"Failed to save pending signal for {symbol} 5min: {e}")
@@ -363,7 +355,6 @@ def generate_signals():
                 print(f"Signal generation error for {symbol} {tf}: {e}")
 
 def get_all_signals():
-    # Filter out expired signals before returning (FIX #4)
     valid_signals = []
     for signal in current_signals.values():
         valid_until = signal.get("valid_until")
@@ -385,24 +376,28 @@ def get_signal_for(symbol, timeframe):
     prices = get_prices(symbol)
     if len(prices) < 60:
         return None
+    
+    # First check cached signal
+    cache_key = f"{symbol}_{timeframe}"
+    if cache_key in current_signals:
+        signal = current_signals[cache_key]
+        valid_until = signal.get("valid_until")
+        if valid_until:
+            try:
+                valid_until_dt = datetime.fromisoformat(valid_until.replace('Z', '+00:00'))
+                if datetime.now(timezone.utc) <= valid_until_dt:
+                    return signal
+            except:
+                return signal
+    
+    # If no cache, try fresh generation
     fn = STRATEGY_MAP.get(timeframe)
     if not fn:
         return None
     fresh = fn(symbol, name, prices)
     if fresh:
-        current_signals[f"{symbol}_{timeframe}"] = fresh
+        current_signals[cache_key] = fresh
         return fresh
-    # Check if existing signal is still valid (FIX #4)
-    existing = current_signals.get(f"{symbol}_{timeframe}")
-    if existing:
-        valid_until = existing.get("valid_until")
-        if valid_until:
-            try:
-                valid_until_dt = datetime.fromisoformat(valid_until.replace('Z', '+00:00'))
-                if datetime.now(timezone.utc) <= valid_until_dt:
-                    return existing
-            except:
-                return existing
     return None
 
 def get_recommendations():
@@ -436,6 +431,7 @@ def get_recommendations():
             "why": _explain(sig, sess),
             "reason": sig["reason"],
             "timestamp": sig["timestamp"],
+            "indicators": sig.get("indicators", {})  # Include indicators in response
         })
     return {
         "status": "ok",
@@ -456,4 +452,4 @@ def _explain(sig, session):
         f"Valid for {validity} seconds — act quickly. "
         f"Market: {session['note']}. "
         f"Indicators: {sig['reason']}."
-            )
+        )
