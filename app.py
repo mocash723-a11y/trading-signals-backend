@@ -182,13 +182,24 @@ class CloseSavedTradePayload(BaseModel):
 
 @app.post("/saved-trades/save")
 def save_recommendation_trade(payload: SaveRecommendationTradePayload):
-    """Save a trade from recommendations tab."""
+    """Save a trade from recommendations tab with full indicator data."""
     from feedback import save_trade_from_recommendation
+    from signals import current_signals
     
-    # Try to get indicators from the original signal
-    from signals import get_signal_for
-    signal = get_signal_for(payload.symbol, payload.timeframe)
-    indicators = signal.get("indicators", {}) if signal else {}
+    # Try to get indicators from the cached signal (recommendations tab)
+    indicators = {}
+    cache_key = f"{payload.symbol}_{payload.timeframe}"
+    
+    if cache_key in current_signals:
+        signal = current_signals[cache_key]
+        # The indicators are stored in the signal's 'indicators' field
+        if "indicators" in signal:
+            indicators = signal["indicators"]
+            print(f"Found indicators for {cache_key}: {list(indicators.keys())}")
+        else:
+            print(f"Warning: No indicators found in cached signal for {cache_key}")
+    else:
+        print(f"Warning: No cached signal found for {cache_key}")
     
     success = save_trade_from_recommendation(
         signal_id=payload.signal_id,
@@ -197,12 +208,16 @@ def save_recommendation_trade(payload: SaveRecommendationTradePayload):
         direction=payload.direction,
         entry_price=payload.entry_price,
         confidence=payload.confidence,
-        indicators=indicators,
+        indicators=indicators,  # Now passing the actual indicators!
         user_id=payload.user_id
     )
     
     if success:
-        return {"status": "saved", "message": "Trade saved! Record outcome when position closes."}
+        return {
+            "status": "saved", 
+            "message": "Trade saved with indicator data! Record outcome when position closes.",
+            "indicators_saved": len(indicators) > 0
+        }
     return {"status": "error", "message": "Trade already saved or failed"}
 
 @app.post("/saved-trades/close")
