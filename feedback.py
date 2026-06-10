@@ -265,7 +265,7 @@ def update_signal_outcome(signal_id, outcome):
 def save_trade_from_recommendation(signal_id, symbol, timeframe, direction, 
                                    entry_price, confidence, indicators, 
                                    user_id="default"):
-    """Save a trade from recommendations tab for tracking."""
+    """Save a trade from recommendations tab with full indicator data."""
     doc = {
         "signal_id": signal_id,
         "symbol": symbol,
@@ -273,12 +273,13 @@ def save_trade_from_recommendation(signal_id, symbol, timeframe, direction,
         "direction": direction,
         "entry_price": entry_price,
         "confidence": confidence,
-        "features": indicators,
+        "features": indicators if indicators else {},  # Now saves the actual indicators!
         "user_id": user_id,
         "status": "open",
         "saved_at": datetime.now(timezone.utc),
         "closed_at": None,
-        "outcome": None
+        "outcome": None,
+        "actual_profit_pct": None
     }
     try:
         db = _get_db()
@@ -286,9 +287,10 @@ def save_trade_from_recommendation(signal_id, symbol, timeframe, direction,
             # Check if already saved to prevent duplicates
             existing = db["saved_trades"].find_one({"signal_id": signal_id})
             if existing:
+                print(f"Trade {signal_id} already exists, skipping save")
                 return False
             db["saved_trades"].insert_one(doc)
-            print(f"Trade saved from recommendation: {signal_id}")
+            print(f"Trade saved from recommendation with indicators: {signal_id}")
             return True
     except Exception as e:
         print(f"Save trade error: {e}")
