@@ -183,9 +183,8 @@ def get_saved_trades(user_id: str = "default", status: Optional[str] = None):
 
 @app.get("/ai-stats")
 def get_ai_stats():
-    """Get AI model training status and statistics"""
-    import json
     import os
+    import json
     from pymongo import MongoClient
     
     MONGO_URI = os.environ.get("MONGO_URI")
@@ -196,56 +195,40 @@ def get_ai_stats():
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["trading_signals"]
         
-        # COUNT FROM training_examples (which has outcomes and features)
-        # training_examples stores outcome as 1 (win) or 0 (loss)
-        total_trades = db.training_examples.count_documents({})
-        wins = db.training_examples.count_documents({"outcome": 1})
-        losses = db.training_examples.count_documents({"outcome": 0})
+        # Count from training_data collection (permanent, with features)
+        total_trades = db.training_data.count_documents({})
+        wins = db.training_data.count_documents({"outcome": "win"})
+        losses = db.training_data.count_documents({"outcome": "loss"})
         
-        # Check if model exists
         model_exists = os.path.exists("model.pkl")
-        
-        # Get training metadata if model exists
         model_metadata = None
         if os.path.exists("model_metadata.json"):
             with open("model_metadata.json", "r") as f:
                 model_metadata = json.load(f)
         
-        # Determine training readiness
         if total_trades >= 500:
-            status = "excellent"
-            message = "✅ AI has excellent data! Model is highly accurate."
+            status, msg = "excellent", "✅ Excellent! Model is highly accurate."
         elif total_trades >= 200:
-            status = "good"
-            message = "👍 AI has good data. Model is learning patterns."
+            status, msg = "good", "👍 Good data. Model learning patterns."
         elif total_trades >= 100:
-            status = "decent"
-            message = "📈 AI has decent data. Keep trading for better accuracy."
+            status, msg = "decent", "📈 Decent data. Keep trading."
         elif total_trades >= 50:
-            status = "learning"
-            message = "🔄 AI is learning. Need 50+ more trades for good accuracy."
+            status, msg = "learning", "🔄 Learning. Need 50+ more trades."
         else:
-            status = "needs_data"
-            message = f"📊 Need {50 - total_trades} more trades with feedback to train AI."
-        
-        win_rate = round(wins/total_trades*100, 1) if total_trades > 0 else 0
+            status, msg = "needs_data", f"📊 Need {50 - total_trades} more trades to begin training."
         
         return {
             "status": status,
-            "message": message,
+            "message": msg,
             "model_exists": model_exists,
             "training_data": {
                 "total_trades": total_trades,
                 "wins": wins,
                 "losses": losses,
-                "win_rate": win_rate
+                "win_rate": round(wins/total_trades*100, 1) if total_trades else 0
             },
             "model_metadata": model_metadata,
-            "requirements": {
-                "minimum_trades": 50,
-                "recommended_trades": 200,
-                "excellent_trades": 500
-            }
+            "requirements": {"minimum_trades": 50, "recommended_trades": 200, "excellent_trades": 500}
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
