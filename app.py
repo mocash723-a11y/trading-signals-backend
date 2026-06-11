@@ -185,7 +185,7 @@ def get_saved_trades(user_id: str = "default", status: Optional[str] = None):
 def get_ai_stats():
     """Get AI model training status and statistics"""
     import json
-    from datetime import datetime
+    import os
     from pymongo import MongoClient
     
     MONGO_URI = os.environ.get("MONGO_URI")
@@ -196,29 +196,20 @@ def get_ai_stats():
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["trading_signals"]
         
-        # Count trades with indicators
-        total_trades = db.pending_signals.count_documents({
-            "outcome": {"$in": ["win", "loss"]},
-            "features": {"$ne": {}}
-        })
+        # COUNT FROM training_examples (which has outcomes and features)
+        # training_examples stores outcome as 1 (win) or 0 (loss)
+        total_trades = db.training_examples.count_documents({})
+        wins = db.training_examples.count_documents({"outcome": 1})
+        losses = db.training_examples.count_documents({"outcome": 0})
         
-        wins = db.pending_signals.count_documents({
-            "outcome": "win",
-            "features": {"$ne": {}}
-        })
-        
-        losses = db.pending_signals.count_documents({
-            "outcome": "loss",
-            "features": {"$ne": {}}
-        })
+        # Check if model exists
+        model_exists = os.path.exists("model.pkl")
         
         # Get training metadata if model exists
         model_metadata = None
         if os.path.exists("model_metadata.json"):
             with open("model_metadata.json", "r") as f:
                 model_metadata = json.load(f)
-        
-        model_exists = os.path.exists("model.pkl")
         
         # Determine training readiness
         if total_trades >= 500:
@@ -237,6 +228,8 @@ def get_ai_stats():
             status = "needs_data"
             message = f"📊 Need {50 - total_trades} more trades with feedback to train AI."
         
+        win_rate = round(wins/total_trades*100, 1) if total_trades > 0 else 0
+        
         return {
             "status": status,
             "message": message,
@@ -245,7 +238,7 @@ def get_ai_stats():
                 "total_trades": total_trades,
                 "wins": wins,
                 "losses": losses,
-                "win_rate": round(wins/total_trades*100, 1) if total_trades > 0 else 0
+                "win_rate": win_rate
             },
             "model_metadata": model_metadata,
             "requirements": {
