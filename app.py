@@ -343,3 +343,27 @@ def get_ai_stats():
     
     return {"status": "error", "message": "Could not connect to database"}
     return {"trades": trades, "count": len(trades)}
+
+@app.post("/train-ai")
+def train_ai_manual():
+    """Manually trigger AI training"""
+    import subprocess
+    import threading
+    
+    def run_training():
+        try:
+            result = subprocess.run(["python", "train_model.py"], capture_output=True, text=True, timeout=300)
+            print(f"Training output: {result.stdout}")
+            if result.stderr:
+                print(f"Training errors: {result.stderr}")
+        except Exception as e:
+            print(f"Training failed: {e}")
+    
+    # Run training in background so API doesn't timeout
+    thread = threading.Thread(target=run_training)
+    thread.start()
+    
+    return {
+        "status": "training_started",
+        "message": "AI training has started. Check back in 1-2 minutes for updated stats."
+    }
