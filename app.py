@@ -14,7 +14,7 @@ from feedback import record_outcome, get_stats, get_pair_accuracy, update_signal
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load saved thresholds from MongoDB on startup (FIX #3)
+    # Load saved thresholds from MongoDB on startup
     load_adaptive_thresholds_from_mongo()
     
     # Start background tasks
@@ -24,13 +24,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Trading Signals API", lifespan=lifespan)
 
-# FIX #10: Lock CORS to your frontend domain in production
-# Change this to your actual Lovable frontend URL when deployed
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "*")
-
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL] if FRONTEND_URL != "*" else ["*"],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -42,35 +39,6 @@ async def signal_loop():
         except Exception as e:
             print(f"Signal error: {e}")
         await asyncio.sleep(5)
-
-# ── Auto‑match fallback for missing signal_id ─────────────────────────────
-def find_and_resolve_pending_signal(symbol: str, timeframe: str, direction: str, outcome: str):
-    """If frontend doesn't send signal_id, match the most recent pending signal."""
-    try:
-        from feedback import _get_db  # Use the same singleton connection
-        db = _get_db()
-        if db is None:
-            return None
-        
-        # Find newest pending signal for same symbol, timeframe, direction
-        pending = db.pending_signals.find_one(
-            {
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "direction": direction,
-                "outcome": "pending"
-            },
-            sort=[("timestamp", -1)]
-        )
-        if pending:
-            signal_id = pending["signal_id"]
-            update_signal_outcome(signal_id, outcome)
-            print(f"Auto-resolved {signal_id} for {symbol} {timeframe} {direction}")
-            return signal_id
-        return None
-    except Exception as e:
-        print(f"Auto-match error (non-fatal): {e}")
-        return None
 
 # ── Basic endpoints ──────────────────────────────────────────────────────
 @app.get("/")
@@ -113,7 +81,7 @@ def recommend():
 def get_prices():
     return get_latest_ticks()
 
-# ── Feedback endpoint (with auto‑match fallback) ─────────────────────────
+# ── Feedback endpoint ─────────────────────────────────────────
 class FeedbackPayload(BaseModel):
     symbol: str
     timeframe: str
@@ -124,7 +92,6 @@ class FeedbackPayload(BaseModel):
 
 @app.post("/feedback")
 def submit_feedback(payload: FeedbackPayload):
-    # Always record outcome in training_examples (legacy + backup)
     record_outcome(
         symbol=payload.symbol,
         timeframe=payload.timeframe,
@@ -132,15 +99,9 @@ def submit_feedback(payload: FeedbackPayload):
         outcome=payload.outcome,
         confidence=payload.confidence
     )
-    # Try to resolve a pending signal
     if payload.signal_id:
         update_signal_outcome(payload.signal_id, payload.outcome)
-    else:
-        # Auto-match if signal_id missing (Lovable frontend)
-        find_and_resolve_pending_signal(
-            payload.symbol, payload.timeframe,
-            payload.direction, payload.outcome
-        )
+    
     stats = get_pair_accuracy(payload.symbol, payload.timeframe)
     return {
         "status": "recorded",
@@ -160,11 +121,7 @@ def get_pair_stats(symbol: str, timeframe: str):
 def reload_model():
     return {"status": "Model reload feature will be activated after you upload model.pkl"}
 
-# Add these new endpoints after your existing ones
-
-from pydantic import BaseModel
-from typing import Optional
-
+# ── Saved Trades endpoints ─────────────────────────────────────────────
 class SaveRecommendationTradePayload(BaseModel):
     signal_id: str
     symbol: str
@@ -176,55 +133,22 @@ class SaveRecommendationTradePayload(BaseModel):
 
 class CloseSavedTradePayload(BaseModel):
     signal_id: str
-    outcome: str  # "win" or "loss"
+    outcome: str
     actual_profit_pct: Optional[float] = None
     user_id: Optional[str] = "default"
 
 @app.post("/saved-trades/save")
 def save_recommendation_trade(payload: SaveRecommendationTradePayload):
-    """Save a trade from recommendations tab with full indicator data."""
-    from feedback import save_trade_from_recommendation, _get_db
+    from feedback import save_trade_from_recommendation
     from signals import current_signals
     
     indicators = {}
-    
-    # FIRST: Try to get indicators from memory (fastest)
     cache_key = f"{payload.symbol}_{payload.timeframe}"
     
     if cache_key in current_signals:
         signal = current_signals[cache_key]
         if "indicators" in signal:
             indicators = signal["indicators"]
-            print(f"✅ Found indicators in memory for {cache_key}")
-    
-    # SECOND (FALLBACK): If not in memory, search MongoDB pending_signals
-    if not indicators:
-        print(f"⚠️ Signal not in memory, searching MongoDB for {cache_key}")
-        try:
-            db = _get_db()
-            if db is not None:
-                # Find the most recent pending signal for this symbol/timeframe/direction
-                pending = db["pending_signals"].find_one(
-                    {
-                        "symbol": payload.symbol,
-                        "timeframe": payload.timeframe,
-                        "direction": payload.direction,
-                        "outcome": "pending"  # Only unresolved signals
-                    },
-                    sort=[("timestamp", -1)]  # Most recent first
-                )
-                
-                if pending and "features" in pending:
-                    indicators = pending["features"]
-                    print(f"✅ Found indicators in MongoDB pending_signals for {cache_key}")
-                else:
-                    print(f"❌ No pending signal found in MongoDB for {cache_key}")
-        except Exception as e:
-            print(f"Fallback MongoDB search error: {e}")
-    
-    # THIRD: Log if still no indicators found
-    if not indicators:
-        print(f"⚠️ WARNING: No indicators found for {cache_key} - AI training will be incomplete for this trade")
     
     success = save_trade_from_recommendation(
         signal_id=payload.signal_id,
@@ -238,47 +162,38 @@ def save_recommendation_trade(payload: SaveRecommendationTradePayload):
     )
     
     if success:
-        return {
-            "status": "saved", 
-            "message": "Trade saved!",
-            "indicators_found": len(indicators) > 0,
-            "source": "memory" if cache_key in current_signals else "mongodb" if indicators else "none"
-        }
+        return {"status": "saved", "message": "Trade saved!"}
     return {"status": "error", "message": "Trade already saved or failed"}
-    
+
 @app.post("/saved-trades/close")
 def close_saved_trade(payload: CloseSavedTradePayload):
-    """Record win/loss for a saved trade."""
     from feedback import close_saved_trade
-    
-    success = close_saved_trade(
-        signal_id=payload.signal_id,
-        outcome=payload.outcome,
-        actual_profit_pct=payload.actual_profit_pct
-    )
-    
+    success = close_saved_trade(payload.signal_id, payload.outcome, payload.actual_profit_pct)
     if success:
-        return {"status": "recorded", "message": f"Trade recorded as {payload.outcome.upper()}! Training data updated."}
+        return {"status": "recorded", "message": f"Trade recorded as {payload.outcome.upper()}!"}
     return {"status": "error", "message": "Failed to record outcome"}
 
 @app.get("/saved-trades")
 def get_saved_trades(user_id: str = "default", status: Optional[str] = None):
-    """Get all saved trades for a user."""
     from feedback import get_user_trades
     trades = get_user_trades(user_id, status)
+    return {"trades": trades, "count": len(trades)}
 
-    @app.get("/ai-stats")
+# ========== AI STATS ENDPOINTS (ADD AT THE VERY BOTTOM) ==========
+
+@app.get("/ai-stats")
 def get_ai_stats():
     """Get AI model training status and statistics"""
-    import os
     import json
     from datetime import datetime
     from pymongo import MongoClient
     
-    # Get training data count from MongoDB
     MONGO_URI = os.environ.get("MONGO_URI")
-    if MONGO_URI:
-        client = MongoClient(MONGO_URI)
+    if not MONGO_URI:
+        return {"status": "error", "message": "MONGO_URI not configured"}
+    
+    try:
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["trading_signals"]
         
         # Count trades with indicators
@@ -293,7 +208,7 @@ def get_ai_stats():
         })
         
         losses = db.pending_signals.count_documents({
-            "outcome": "loss", 
+            "outcome": "loss",
             "features": {"$ne": {}}
         })
         
@@ -303,7 +218,6 @@ def get_ai_stats():
             with open("model_metadata.json", "r") as f:
                 model_metadata = json.load(f)
         
-        # Check if model.pkl exists
         model_exists = os.path.exists("model.pkl")
         
         # Determine training readiness
@@ -311,7 +225,7 @@ def get_ai_stats():
             status = "excellent"
             message = "✅ AI has excellent data! Model is highly accurate."
         elif total_trades >= 200:
-            status = "good" 
+            status = "good"
             message = "👍 AI has good data. Model is learning patterns."
         elif total_trades >= 100:
             status = "decent"
@@ -340,9 +254,9 @@ def get_ai_stats():
                 "excellent_trades": 500
             }
         }
-    
-    return {"status": "error", "message": "Could not connect to database"}
-    return {"trades": trades, "count": len(trades)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 
 @app.post("/train-ai")
 def train_ai_manual():
@@ -359,7 +273,7 @@ def train_ai_manual():
         except Exception as e:
             print(f"Training failed: {e}")
     
-    # Run training in background so API doesn't timeout
+    # Run training in background
     thread = threading.Thread(target=run_training)
     thread.start()
     
