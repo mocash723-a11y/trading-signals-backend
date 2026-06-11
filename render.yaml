@@ -5,3 +5,17 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     plan: free
+    envVars:
+      - key: MONGO_URI
+        sync: false
+
+  - type: cron
+    name: train-ai-model
+    env: python
+    schedule: "0 0 * * 0"  # Runs every Sunday at midnight UTC
+    buildCommand: pip install -r requirements.txt
+    startCommand: python train_model.py
+    plan: free
+    envVars:
+      - key: MONGO_URI
+        sync: false
