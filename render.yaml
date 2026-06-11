@@ -9,13 +9,12 @@ services:
       - key: MONGO_URI
         sync: false
 
-  - type: cron
+    - type: cron
     name: train-ai-model
     env: python
-    schedule: "0 0 * * 0"  # Runs every Sunday at midnight UTC
+    schedule: "0 */12 * * *"  # Every 12 hours (or "0 0 * * 0" for weekly)
     buildCommand: pip install -r requirements.txt
     startCommand: python train_model.py
-    plan: free
     envVars:
       - key: MONGO_URI
         sync: false
