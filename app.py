@@ -14,17 +14,13 @@ from feedback import record_outcome, get_stats, get_pair_accuracy, update_signal
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load saved thresholds from MongoDB on startup
     load_adaptive_thresholds_from_mongo()
-    
-    # Start background tasks
     asyncio.create_task(start_feed())
     asyncio.create_task(signal_loop())
     yield
 
 app = FastAPI(title="Trading Signals API", lifespan=lifespan)
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,7 +36,8 @@ async def signal_loop():
             print(f"Signal error: {e}")
         await asyncio.sleep(5)
 
-# ── Basic endpoints ──────────────────────────────────────────────────────
+# ==================== BASIC ENDPOINTS ====================
+
 @app.get("/")
 def root():
     return {"status": "Trading Signals API is running", "ml_loaded": ml_model is not None}
@@ -81,7 +78,8 @@ def recommend():
 def get_prices():
     return get_latest_ticks()
 
-# ── Feedback endpoint ─────────────────────────────────────────
+# ==================== FEEDBACK ====================
+
 class FeedbackPayload(BaseModel):
     symbol: str
     timeframe: str
@@ -101,7 +99,6 @@ def submit_feedback(payload: FeedbackPayload):
     )
     if payload.signal_id:
         update_signal_outcome(payload.signal_id, payload.outcome)
-    
     stats = get_pair_accuracy(payload.symbol, payload.timeframe)
     return {
         "status": "recorded",
@@ -121,7 +118,8 @@ def get_pair_stats(symbol: str, timeframe: str):
 def reload_model():
     return {"status": "Model reload feature will be activated after you upload model.pkl"}
 
-# ── Saved Trades endpoints ─────────────────────────────────────────────
+# ==================== SAVED TRADES (Recommendations) ====================
+
 class SaveRecommendationTradePayload(BaseModel):
     signal_id: str
     symbol: str
@@ -141,15 +139,14 @@ class CloseSavedTradePayload(BaseModel):
 def save_recommendation_trade(payload: SaveRecommendationTradePayload):
     from feedback import save_trade_from_recommendation
     from signals import current_signals
-    
+
     indicators = {}
     cache_key = f"{payload.symbol}_{payload.timeframe}"
-    
     if cache_key in current_signals:
         signal = current_signals[cache_key]
         if "indicators" in signal:
             indicators = signal["indicators"]
-    
+
     success = save_trade_from_recommendation(
         signal_id=payload.signal_id,
         symbol=payload.symbol,
@@ -160,7 +157,6 @@ def save_recommendation_trade(payload: SaveRecommendationTradePayload):
         indicators=indicators,
         user_id=payload.user_id
     )
-    
     if success:
         return {"status": "saved", "message": "Trade saved!"}
     return {"status": "error", "message": "Trade already saved or failed"}
@@ -179,44 +175,47 @@ def get_saved_trades(user_id: str = "default", status: Optional[str] = None):
     trades = get_user_trades(user_id, status)
     return {"trades": trades, "count": len(trades)}
 
-# ========== AI STATS ENDPOINTS (ADD AT THE VERY BOTTOM) ==========
+# ==================== AI TRAINING STATS ====================
 
 @app.get("/ai-stats")
 def get_ai_stats():
-    import os
     import json
     from pymongo import MongoClient
-    
+
     MONGO_URI = os.environ.get("MONGO_URI")
     if not MONGO_URI:
         return {"status": "error", "message": "MONGO_URI not configured"}
-    
+
     try:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["trading_signals"]
-        
-        # Count from training_data collection (permanent, with features)
+
         total_trades = db.training_data.count_documents({})
         wins = db.training_data.count_documents({"outcome": "win"})
         losses = db.training_data.count_documents({"outcome": "loss"})
-        
+
         model_exists = os.path.exists("model.pkl")
         model_metadata = None
         if os.path.exists("model_metadata.json"):
             with open("model_metadata.json", "r") as f:
                 model_metadata = json.load(f)
-        
+
         if total_trades >= 500:
-            status, msg = "excellent", "✅ Excellent! Model is highly accurate."
+            status = "excellent"
+            msg = "✅ Excellent! Model is highly accurate."
         elif total_trades >= 200:
-            status, msg = "good", "👍 Good data. Model learning patterns."
+            status = "good"
+            msg = "👍 Good data. Model learning patterns."
         elif total_trades >= 100:
-            status, msg = "decent", "📈 Decent data. Keep trading."
+            status = "decent"
+            msg = "📈 Decent data. Keep trading."
         elif total_trades >= 50:
-            status, msg = "learning", "🔄 Learning. Need 50+ more trades."
+            status = "learning"
+            msg = "🔄 Learning. Need 50+ more trades."
         else:
-            status, msg = "needs_data", f"📊 Need {50 - total_trades} more trades to begin training."
-        
+            status = "needs_data"
+            msg = f"📊 Need {50 - total_trades} more trades to begin training."
+
         return {
             "status": status,
             "message": msg,
@@ -225,7 +224,7 @@ def get_ai_stats():
                 "total_trades": total_trades,
                 "wins": wins,
                 "losses": losses,
-                "win_rate": round(wins/total_trades*100, 1) if total_trades else 0
+                "win_rate": round(wins / total_trades * 100, 1) if total_trades else 0
             },
             "model_metadata": model_metadata,
             "requirements": {"minimum_trades": 50, "recommended_trades": 200, "excellent_trades": 500}
@@ -233,13 +232,11 @@ def get_ai_stats():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 @app.post("/train-ai")
 def train_ai_manual():
-    """Manually trigger AI training"""
     import subprocess
     import threading
-    
+
     def run_training():
         try:
             result = subprocess.run(["python", "train_model.py"], capture_output=True, text=True, timeout=300)
@@ -248,12 +245,6 @@ def train_ai_manual():
                 print(f"Training errors: {result.stderr}")
         except Exception as e:
             print(f"Training failed: {e}")
-    
-    # Run training in background
-    thread = threading.Thread(target=run_training)
-    thread.start()
-    
-    return {
-        "status": "training_started",
-        "message": "AI training has started. Check back in 1-2 minutes for updated stats."
-    }
+
+    threading.Thread(target=run_training).start()
+    return {"status": "training_started", "message": "AI training has started. Check back in 1-2 minutes."}
