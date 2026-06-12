@@ -247,46 +247,67 @@ def save_pending_signal(signal_id, symbol, timeframe, direction, confidence, ind
         print(f"Pending signal save error (non-fatal): {e}")
 
 def update_signal_outcome(signal_id, outcome):
-    """Record outcome and save a permanent copy to training_data."""
+    """Record outcome (win/loss/breakeven) and save to training_data."""
+    if outcome not in ["win", "loss", "breakeven"]:
+        print(f"Invalid outcome: {outcome}")
+        return False
+
     try:
         db = _get_db()
         if db is None:
             print("update_signal_outcome: No database connection")
             return False
 
-        # 1. Update the pending signal
+        # 1. Update the pending signal (if exists)
         result = db[COLL_PENDING].update_one(
             {"signal_id": signal_id},
             {"$set": {"outcome": outcome, "resolved_at": datetime.now(timezone.utc)}}
         )
-        if result.matched_count == 0:
-            print(f"update_signal_outcome: Signal {signal_id} not found in pending_signals")
+        # Don't fail if pending not found – might be already deleted
+
+        # 2. Fetch from saved_trades (primary source)
+        trade = db["saved_trades"].find_one({"signal_id": signal_id})
+        if not trade:
+            print(f"update_signal_outcome: Trade {signal_id} not found in saved_trades")
             return False
 
-        # 2. Fetch the updated pending signal
-        pending = db[COLL_PENDING].find_one({"signal_id": signal_id})
-        if not pending:
-            print(f"update_signal_outcome: Could not fetch pending signal {signal_id}")
-            return False
+        # 3. Get features (from trade or pending)
+        features = trade.get("features", {})
+        if not features:
+            pending = db[COLL_PENDING].find_one({"signal_id": signal_id})
+            if pending and pending.get("features"):
+                features = pending["features"]
 
-        # 3. Create a permanent training record (always, even if features empty)
+        # 4. Create training record (always)
         training_doc = {
             "signal_id": signal_id,
-            "symbol": pending.get("symbol"),
-            "timeframe": pending.get("timeframe"),
-            "direction": pending.get("direction"),
-            "confidence": pending.get("confidence"),
+            "symbol": trade["symbol"],
+            "timeframe": trade["timeframe"],
+            "direction": trade["direction"],
+            "confidence": trade["confidence"],
             "outcome": outcome,
-            "features": pending.get("features", {}),
-            "timestamp": pending.get("timestamp"),
-            "resolved_at": datetime.now(timezone.utc)
+            "features": features,
+            "entry_price": trade.get("entry_price"),
+            "saved_at": trade.get("saved_at"),
+            "closed_at": datetime.now(timezone.utc)
         }
         db["training_data"].update_one(
             {"signal_id": signal_id},
             {"$set": training_doc},
             upsert=True
         )
-        print(f"✅ Saved to training_data: {signal_id} (features present: {bool(training_doc['features'])})")
+        print(f"✅ Saved to training_data: {signal_id} (outcome: {outcome}, features: {bool(features)})")
+
+        # 5. Update stats only if win/loss (ignore breakeven)
+        if outcome != "breakeven":
+            record_outcome(
+                symbol=trade["symbol"],
+                timeframe=trade["timeframe"],
+                direction=trade["direction"],
+                outcome=outcome,
+                confidence=trade["confidence"]
+            )
+
         return True
 
     except Exception as e:
