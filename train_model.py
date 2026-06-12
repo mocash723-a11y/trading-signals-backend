@@ -21,7 +21,8 @@ db = client["trading_signals"]
 
 # Get ALL resolved trades from training_data collection
 # This collection has no TTL and only stores completed trades with features
-trades = list(db.training_data.find({"features": {"$ne": {}}}))
+trades = list(db.training_data.find({"outcome": {"$in": ["win", "loss"]}, "features": {"$ne": {}}}))
+
 
 print(f"📊 Found {len(trades)} trades in training_data with indicators")
 
