@@ -146,6 +146,11 @@ def save_recommendation_trade(payload: SaveRecommendationTradePayload):
         signal = current_signals[cache_key]
         if "indicators" in signal:
             indicators = signal["indicators"]
+            print(f"Captured indicators for {cache_key}: {list(indicators.keys())}")
+        else:
+            print(f"Warning: Signal {cache_key} has no 'indicators' field")
+    else:
+        print(f"Warning: No current signal for {cache_key}")
 
     success = save_trade_from_recommendation(
         signal_id=payload.signal_id,
@@ -158,7 +163,7 @@ def save_recommendation_trade(payload: SaveRecommendationTradePayload):
         user_id=payload.user_id
     )
     if success:
-        return {"status": "saved", "message": "Trade saved!"}
+        return {"status": "saved", "message": "Trade saved!", "indicators_captured": len(indicators) > 0}
     return {"status": "error", "message": "Trade already saved or failed"}
 
 @app.post("/saved-trades/close")
