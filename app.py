@@ -166,6 +166,32 @@ def save_recommendation_trade(payload: SaveRecommendationTradePayload):
         return {"status": "saved", "message": "Trade saved!", "indicators_captured": len(indicators) > 0}
     return {"status": "error", "message": "Trade already saved or failed"}
 
+@app.delete("/saved-trades/{signal_id}")
+def remove_saved_trade(signal_id: str, user_id: str = "default"):
+    """Remove a trade from saved_trades (e.g., user cancelled or didn't take trade)."""
+    from feedback import _get_db
+    
+    db = _get_db()
+    if db is None:
+        return {"status": "error", "message": "Database not available"}
+    
+    # Only allow removal if trade is still open (no outcome recorded)
+    trade = db["saved_trades"].find_one({"signal_id": signal_id, "user_id": user_id})
+    if not trade:
+        return {"status": "error", "message": "Trade not found"}
+    
+    if trade.get("status") != "open":
+        return {"status": "error", "message": "Cannot remove trade that is already closed"}
+    
+    # Delete the trade
+    result = db["saved_trades"].delete_one({"signal_id": signal_id, "user_id": user_id})
+    if result.deleted_count > 0:
+        # Optionally also delete from pending_signals if still pending (but keep for history? No)
+        # We'll just remove from saved_trades.
+        return {"status": "success", "message": "Trade removed successfully"}
+    else:
+        return {"status": "error", "message": "Failed to remove trade"}
+
 @app.post("/saved-trades/close")
 def close_saved_trade(payload: CloseSavedTradePayload):
     from feedback import close_saved_trade
