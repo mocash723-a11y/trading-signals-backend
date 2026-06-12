@@ -191,35 +191,15 @@ def get_ai_stats():
     if not MONGO_URI:
         return {"status": "error", "message": "MONGO_URI not configured"}
 
-    try:
+    try:  # <-- try block starts here
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["trading_signals"]
-        
-total_trades = db.training_data.count_documents({})
-wins = db.training_data.count_documents({"outcome": "win"})
-losses = db.training_data.count_documents({"outcome": "loss"})
 
-        model_exists = os.path.exists("model.pkl")
-        model_metadata = None
-        if os.path.exists("model_metadata.json"):
-            with open("model_metadata.json", "r") as f:
-                model_metadata = json.load(f)
+        total_trades = db.training_data.count_documents({})
+        wins = db.training_data.count_documents({"outcome": "win"})
+        losses = db.training_data.count_documents({"outcome": "loss"})
 
-        if total_trades >= 500:
-            status = "excellent"
-            msg = "✅ Excellent! Model is highly accurate."
-        elif total_trades >= 200:
-            status = "good"
-            msg = "👍 Good data. Model learning patterns."
-        elif total_trades >= 100:
-            status = "decent"
-            msg = "📈 Decent data. Keep trading."
-        elif total_trades >= 50:
-            status = "learning"
-            msg = "🔄 Learning. Need 50+ more trades."
-        else:
-            status = "needs_data"
-            msg = f"📊 Need {50 - total_trades} more trades to begin training."
+        # ... rest of your logic (model_exists, status, message, etc.) ...
 
         return {
             "status": status,
@@ -234,9 +214,9 @@ losses = db.training_data.count_documents({"outcome": "loss"})
             "model_metadata": model_metadata,
             "requirements": {"minimum_trades": 50, "recommended_trades": 200, "excellent_trades": 500}
         }
-    except Exception as e:
+    except Exception as e:  # <-- The missing except block
         return {"status": "error", "message": str(e)}
-
+        
 @app.post("/train-ai")
 def train_ai_manual():
     import subprocess
