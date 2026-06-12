@@ -185,13 +185,14 @@ def get_saved_trades(user_id: str = "default", status: Optional[str] = None):
 @app.get("/ai-stats")
 def get_ai_stats():
     import json
+    import os
     from pymongo import MongoClient
 
     MONGO_URI = os.environ.get("MONGO_URI")
     if not MONGO_URI:
         return {"status": "error", "message": "MONGO_URI not configured"}
 
-    try:  # <-- try block starts here
+    try:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["trading_signals"]
 
@@ -199,7 +200,28 @@ def get_ai_stats():
         wins = db.training_data.count_documents({"outcome": "win"})
         losses = db.training_data.count_documents({"outcome": "loss"})
 
-        # ... rest of your logic (model_exists, status, message, etc.) ...
+        model_exists = os.path.exists("model.pkl")
+        model_metadata = None
+        if os.path.exists("model_metadata.json"):
+            with open("model_metadata.json", "r") as f:
+                model_metadata = json.load(f)
+
+        # Determine status and message based on total_trades
+        if total_trades >= 500:
+            status = "excellent"
+            msg = "✅ Excellent! Model is highly accurate."
+        elif total_trades >= 200:
+            status = "good"
+            msg = "👍 Good data. Model learning patterns."
+        elif total_trades >= 100:
+            status = "decent"
+            msg = "📈 Decent data. Keep trading."
+        elif total_trades >= 50:
+            status = "learning"
+            msg = "🔄 Learning. Need 50+ more trades."
+        else:
+            status = "needs_data"
+            msg = f"📊 Need {50 - total_trades} more trades to begin training."
 
         return {
             "status": status,
@@ -214,7 +236,7 @@ def get_ai_stats():
             "model_metadata": model_metadata,
             "requirements": {"minimum_trades": 50, "recommended_trades": 200, "excellent_trades": 500}
         }
-    except Exception as e:  # <-- The missing except block
+    except Exception as e:
         return {"status": "error", "message": str(e)}
         
 @app.post("/train-ai")
