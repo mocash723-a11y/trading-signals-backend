@@ -248,3 +248,18 @@ def train_ai_manual():
 
     threading.Thread(target=run_training).start()
     return {"status": "training_started", "message": "AI training has started. Check back in 1-2 minutes."}
+
+@app.get("/debug/verify-signal/{signal_id}")
+def verify_signal(signal_id: str):
+    from feedback import _get_db
+    db = _get_db()
+    if not db:
+        return {"error": "DB not available"}
+    pending = db.pending_signals.find_one({"signal_id": signal_id})
+    if pending:
+        return {
+            "exists": True,
+            "has_features": bool(pending.get("features")),
+            "features_keys": list(pending.get("features", {}).keys())
+        }
+    return {"exists": False, "message": "Signal ID not found in pending_signals"}
