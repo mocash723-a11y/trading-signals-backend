@@ -194,12 +194,10 @@ def get_ai_stats():
     try:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["trading_signals"]
-
-        # NEW (keep total_trades same, but wins/losses only win/loss)
+        
 total_trades = db.training_data.count_documents({})
 wins = db.training_data.count_documents({"outcome": "win"})
 losses = db.training_data.count_documents({"outcome": "loss"})
-# breakeven is included in total_trades but not in wins/losses
 
         model_exists = os.path.exists("model.pkl")
         model_metadata = None
