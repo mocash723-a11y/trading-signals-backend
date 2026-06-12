@@ -330,13 +330,13 @@ def save_trade_from_recommendation(signal_id, symbol, timeframe, direction,
         return False
 
 def close_saved_trade(signal_id, outcome, actual_profit_pct=None):
-    """Record win/loss for a saved trade and update training data."""
+    """Record win/loss and save directly to training_data."""
     try:
         db = _get_db()
         if db is None:
             return False
-        
-        # Update saved_trades
+
+        # 1. Update saved_trades
         result = db["saved_trades"].update_one(
             {"signal_id": signal_id},
             {
@@ -348,26 +348,58 @@ def close_saved_trade(signal_id, outcome, actual_profit_pct=None):
                 }
             }
         )
-        
-        if result.modified_count > 0:
-            # Also update the original pending_signal and training_examples
-            # This links the recommendation trade to your training system
-            update_signal_outcome(signal_id, outcome)
-            
-            # Get the full signal to record in training_examples
-            trade = db["saved_trades"].find_one({"signal_id": signal_id})
-            if trade:
-                record_outcome(
-                    symbol=trade["symbol"],
-                    timeframe=trade["timeframe"],
-                    direction=trade["direction"],
-                    outcome=outcome,
-                    confidence=trade["confidence"]
-                )
-            
-            print(f"Saved trade closed: {signal_id} -> {outcome}")
-            return True
-        return False
+        if result.modified_count == 0:
+            print(f"Close trade error: Signal {signal_id} not found in saved_trades")
+            return False
+
+        # 2. Get the saved trade document
+        trade = db["saved_trades"].find_one({"signal_id": signal_id})
+        if not trade:
+            return False
+
+        # 3. Try to get indicators - FIRST from the trade's features (if any)
+        features = trade.get("features", {})
+        if not features:
+            # Fallback: try to fetch from pending_signals
+            pending = db["pending_signals"].find_one({"signal_id": signal_id})
+            if pending and pending.get("features"):
+                features = pending["features"]
+                print(f"Found features in pending_signals for {signal_id}")
+            else:
+                print(f"Warning: No features found for {signal_id}. AI training will be incomplete.")
+                # We still create training_data with empty features (better than nothing)
+
+        # 4. Create permanent training record
+        training_doc = {
+            "signal_id": signal_id,
+            "symbol": trade["symbol"],
+            "timeframe": trade["timeframe"],
+            "direction": trade["direction"],
+            "confidence": trade["confidence"],
+            "outcome": outcome,
+            "features": features,  # May be empty, but at least we record
+            "entry_price": trade.get("entry_price"),
+            "saved_at": trade.get("saved_at"),
+            "closed_at": datetime.now(timezone.utc)
+        }
+        db["training_data"].update_one(
+            {"signal_id": signal_id},
+            {"$set": training_doc},
+            upsert=True
+        )
+        print(f"✅ Saved to training_data: {signal_id} (features present: {bool(features)})")
+
+        # 5. Also update training_examples for stats
+        record_outcome(
+            symbol=trade["symbol"],
+            timeframe=trade["timeframe"],
+            direction=trade["direction"],
+            outcome=outcome,
+            confidence=trade["confidence"]
+        )
+
+        return True
+
     except Exception as e:
         print(f"Close trade error: {e}")
         return False
