@@ -247,48 +247,50 @@ def save_pending_signal(signal_id, symbol, timeframe, direction, confidence, ind
         print(f"Pending signal save error (non-fatal): {e}")
 
 def update_signal_outcome(signal_id, outcome):
-    """Link a WIN/LOSS result to the specific signal that generated it.
-       Also save a permanent copy to training_data collection."""
+    """Record outcome and save a permanent copy to training_data."""
     try:
         db = _get_db()
-        if db is not None:
-            # Update the pending signal
-            result = db[COLL_PENDING].update_one(
-                {"signal_id": signal_id},
-                {"$set": {"outcome": outcome, "resolved_at": datetime.now(timezone.utc)}}
-            )
-            if result.matched_count == 0:
-                print(f"Signal {signal_id} not found (already resolved or never saved)")
-                return False
-            
-            # Now fetch the updated signal to save to training_data
-            pending = db[COLL_PENDING].find_one({"signal_id": signal_id})
-            if pending and pending.get("features") and len(pending["features"]) > 0:
-                # Create a permanent training record
-                training_doc = {
-                    "signal_id": signal_id,
-                    "symbol": pending["symbol"],
-                    "timeframe": pending["timeframe"],
-                    "direction": pending["direction"],
-                    "confidence": pending["confidence"],
-                    "outcome": outcome,
-                    "features": pending["features"],
-                    "timestamp": pending["timestamp"],
-                    "resolved_at": datetime.now(timezone.utc)
-                }
-                # Insert into training_data collection (no TTL)
-                db["training_data"].update_one(
-                    {"signal_id": signal_id},
-                    {"$set": training_doc},
-                    upsert=True
-                )
-                print(f"Saved to training_data: {signal_id}")
-            else:
-                print(f"Warning: Signal {signal_id} has no features, cannot save to training_data")
-            
-            return True
+        if db is None:
+            print("update_signal_outcome: No database connection")
+            return False
+
+        # 1. Update the pending signal
+        result = db[COLL_PENDING].update_one(
+            {"signal_id": signal_id},
+            {"$set": {"outcome": outcome, "resolved_at": datetime.now(timezone.utc)}}
+        )
+        if result.matched_count == 0:
+            print(f"update_signal_outcome: Signal {signal_id} not found in pending_signals")
+            return False
+
+        # 2. Fetch the updated pending signal
+        pending = db[COLL_PENDING].find_one({"signal_id": signal_id})
+        if not pending:
+            print(f"update_signal_outcome: Could not fetch pending signal {signal_id}")
+            return False
+
+        # 3. Create a permanent training record (always, even if features empty)
+        training_doc = {
+            "signal_id": signal_id,
+            "symbol": pending.get("symbol"),
+            "timeframe": pending.get("timeframe"),
+            "direction": pending.get("direction"),
+            "confidence": pending.get("confidence"),
+            "outcome": outcome,
+            "features": pending.get("features", {}),
+            "timestamp": pending.get("timestamp"),
+            "resolved_at": datetime.now(timezone.utc)
+        }
+        db["training_data"].update_one(
+            {"signal_id": signal_id},
+            {"$set": training_doc},
+            upsert=True
+        )
+        print(f"✅ Saved to training_data: {signal_id} (features present: {bool(training_doc['features'])})")
+        return True
+
     except Exception as e:
-        print(f"Update outcome error: {e}")
+        print(f"update_signal_outcome error: {e}")
         return False
         
 # Add these functions to your existing feedback.py
