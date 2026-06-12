@@ -19,8 +19,7 @@ if not MONGO_URI:
 client = MongoClient(MONGO_URI)
 db = client["trading_signals"]
 
-# Get ALL resolved trades from training_data collection
-# This collection has no TTL and only stores completed trades with features
+
 trades = list(db.training_data.find({"outcome": {"$in": ["win", "loss"]}, "features": {"$ne": {}}}))
 
 
