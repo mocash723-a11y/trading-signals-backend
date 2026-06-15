@@ -112,6 +112,7 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
         reasons.append(f"{candle['pattern']} detected")
     
     # ADX penalty for low-trend markets
+    
     if not symbol.startswith("cry") and candles_1m and len(candles_1m) >= 15:
     highs = [c["high"] for c in candles_1m[-15:]]
     lows = [c["low"] for c in candles_1m[-15:]]
@@ -127,10 +128,6 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
             print(f"📈 ADX Log [{symbol}]: {adx_value:.2f} → GOOD trend (no penalty)")
     else:
         print(f"⚠️ ADX Log [{symbol}]: ADX calculation returned None")
-
-    # Final cap at 100%
-    confidence = min(confidence, 100.0)
-    return confidence
 
 def _session_allows_signal(symbol):
     weekday = datetime.utcnow().weekday()
