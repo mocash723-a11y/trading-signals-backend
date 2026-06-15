@@ -197,7 +197,8 @@ def multi_timeframe_confirm(symbol, direction):
                         confirmations += 1
                         agreement_count += 1
     
-    bonus = {0: 0, 1: 0, 2: 10, 3: 20}.get(confirmations, 0)
+    
+bonus = {0: 0, 1: 0, 2: 8, 3: 8}   
     return {
         "confirmed": confirmations >= 2,
         "bonus": bonus,
