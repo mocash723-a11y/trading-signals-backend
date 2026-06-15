@@ -8,22 +8,32 @@ from feed import (
 from indicators import (
     rsi, ema, macd, bollinger_bands, stochastic, tick_momentum,
     multi_timeframe_confirm, detect_candle_patterns, session_quality,
-    adx, detect_candle_patterns_from_ohlc
+    adx, atr, detect_candle_patterns_from_ohlc
 )
 from feedback import get_adaptive_threshold, save_pending_signal
 
 import joblib
 import os
+import numpy as np
 
-ml_model = None
-if os.path.exists("model.pkl"):
+# Load separate models for BUY and SELL
+ml_model_buy = None
+ml_model_sell = None
+if os.path.exists("model_buy.pkl"):
     try:
-        ml_model = joblib.load("model.pkl")
-        print("AI model loaded successfully.")
+        ml_model_buy = joblib.load("model_buy.pkl")
+        print("AI model (BUY) loaded successfully.")
     except Exception as e:
-        print(f"Model load error: {e}")
-else:
-    print("No model.pkl found — using rule-based confidence only.")
+        print(f"Model load error (BUY): {e}")
+if os.path.exists("model_sell.pkl"):
+    try:
+        ml_model_sell = joblib.load("model_sell.pkl")
+        print("AI model (SELL) loaded successfully.")
+    except Exception as e:
+        print(f"Model load error (SELL): {e}")
+
+if not ml_model_buy and not ml_model_sell:
+    print("No AI models found — using rule-based confidence only.")
 
 current_signals = {}
 
@@ -98,8 +108,8 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
         closes = [c["close"] for c in candles_1m[-15:]]
         adx_val = adx(highs, lows, closes, period=14)
         if adx_val and adx_val["adx"] < 20:
-            confidence *= 0.9
-            reasons.append("Low ADX — ranging market")
+            confidence *= 0.75   # stronger penalty for ranging market
+            reasons.append("Low ADX — ranging market (confidence cut)")
     return confidence
 
 def _session_allows_signal(symbol):
@@ -110,21 +120,55 @@ def _session_allows_signal(symbol):
         return False
     return True
 
-def ml_confidence(symbol, timeframe, direction, prices):
-    if not ml_model:
-        return None
+def _get_real_time_features(symbol, direction):
+    """Compute features for the ML model using real data (candles + prices)."""
     try:
+        candles = get_closed_candles(symbol)
+        if not candles or len(candles) < 20:
+            return None
+        
+        # Use last 20 candles for ADX/ATR
+        highs = [c["high"] for c in candles[-20:]]
+        lows = [c["low"] for c in candles[-20:]]
+        closes = [c["close"] for c in candles[-20:]]
+        
+        adx_val = adx(highs, lows, closes, period=14)
+        atr_val = atr(highs, lows, closes, period=14)
+        
+        # Use last 30 tick prices for RSI/MACD/Stoch/BB
+        prices = get_prices(symbol)
+        if len(prices) < 30:
+            return None
+        
         features = [
             rsi(prices, 7) or 50,
             rsi(prices, 14) or 50,
             macd(prices, 12, 26, 9)["macd_line"] if macd(prices, 12, 26, 9) else 0,
             stochastic(prices, 14)["k"] if stochastic(prices, 14) else 50,
             bollinger_bands(prices, 20, 2.0)["percent_b"] if bollinger_bands(prices, 20, 2.0) else 0.5,
+            adx_val["adx"] if adx_val else 25,
+            atr_val if atr_val else 0.001,
+            session_quality(symbol)["multiplier"],
             1 if direction == "BUY" else 0
         ]
-        prob_up = ml_model.predict_proba([features])[0][1]
-        conf = prob_up * 100 if direction == "BUY" else (1 - prob_up) * 100
-        return round(conf, 1)
+        return features
+    except Exception as e:
+        print(f"Feature extraction error: {e}")
+        return None
+
+def ml_confidence(symbol, timeframe, direction, prices):
+    """Use separate models for BUY and SELL."""
+    model = ml_model_buy if direction == "BUY" else ml_model_sell
+    if not model:
+        return None
+    try:
+        features = _get_real_time_features(symbol, direction)
+        if not features:
+            return None
+        # features length should be 9
+        prob = model.predict_proba([features])[0][1]   # probability of win
+        confidence = prob * 100
+        return round(confidence, 1)
     except Exception as e:
         print(f"ML confidence error: {e}")
         return None
@@ -150,6 +194,7 @@ def signal_5s(symbol, name, prices):
     base_conf = ml_conf if ml_conf else base_conf
     candles = get_closed_candles(symbol)
     confidence = _apply_boosters(symbol, prices, direction, base_conf, reasons, candles)
+    # Build full indicator set (including ADX, ATR, session multiplier)
     indicators = {
         "rsi7": rsi(prices, 7) or 50,
         "rsi14": rsi(prices, 14) or 50,
@@ -158,6 +203,18 @@ def signal_5s(symbol, name, prices):
         "bb_percent_b": bollinger_bands(prices, 20, 2.0)["percent_b"] if bollinger_bands(prices, 20, 2.0) else 0.5,
         "direction_encoded": 1 if direction == "BUY" else 0
     }
+    # Add ADX/ATR/session if candles available
+    if candles and len(candles) >= 15:
+        highs = [c["high"] for c in candles[-15:]]
+        lows = [c["low"] for c in candles[-15:]]
+        closes = [c["close"] for c in candles[-15:]]
+        adx_val = adx(highs, lows, closes, period=14)
+        atr_val = atr(highs, lows, closes, period=14)
+        if adx_val:
+            indicators["adx"] = adx_val["adx"]
+        if atr_val:
+            indicators["atr"] = atr_val
+        indicators["session_multiplier"] = session_quality(symbol)["multiplier"]
     signal = _build_signal(symbol, name, direction, "5s", confidence, prices[-1], " | ".join(reasons), extras={"indicators": indicators})
     if signal:
         try:
@@ -206,6 +263,17 @@ def signal_1min(symbol, name, prices):
         "bb_percent_b": bollinger_bands(sample, 20, 2.0)["percent_b"] if bollinger_bands(sample, 20, 2.0) else 0.5,
         "direction_encoded": 1 if direction == "BUY" else 0
     }
+    if candles and len(candles) >= 15:
+        highs = [c["high"] for c in candles[-15:]]
+        lows = [c["low"] for c in candles[-15:]]
+        closes = [c["close"] for c in candles[-15:]]
+        adx_val = adx(highs, lows, closes, period=14)
+        atr_val = atr(highs, lows, closes, period=14)
+        if adx_val:
+            indicators["adx"] = adx_val["adx"]
+        if atr_val:
+            indicators["atr"] = atr_val
+        indicators["session_multiplier"] = session_quality(symbol)["multiplier"]
     signal = _build_signal(symbol, name, direction, "1min", confidence, prices[-1], " | ".join(reasons), extras={"indicators": indicators})
     if signal:
         try:
@@ -268,6 +336,17 @@ def signal_3min(symbol, name, prices):
                 "bb_percent_b": bollinger_bands(sample, 20, 2.0)["percent_b"] if bollinger_bands(sample, 20, 2.0) else 0.5,
                 "direction_encoded": 1 if direction == "BUY" else 0
             }
+            if candles and len(candles) >= 15:
+                highs = [c["high"] for c in candles[-15:]]
+                lows = [c["low"] for c in candles[-15:]]
+                closes = [c["close"] for c in candles[-15:]]
+                adx_val = adx(highs, lows, closes, period=14)
+                atr_val = atr(highs, lows, closes, period=14)
+                if adx_val:
+                    indicators["adx"] = adx_val["adx"]
+                if atr_val:
+                    indicators["atr"] = atr_val
+                indicators["session_multiplier"] = session_quality(symbol)["multiplier"]
             signal = _build_signal(symbol, name, direction, "3min", confidence, prices[-1], " | ".join(reasons), extras={"indicators": indicators})
             if signal:
                 try:
@@ -331,6 +410,17 @@ def signal_5min(symbol, name, prices):
                 "bb_percent_b": bb["percent_b"],
                 "direction_encoded": 1 if direction == "BUY" else 0
             }
+            if candles and len(candles) >= 15:
+                highs = [c["high"] for c in candles[-15:]]
+                lows = [c["low"] for c in candles[-15:]]
+                closes = [c["close"] for c in candles[-15:]]
+                adx_val = adx(highs, lows, closes, period=14)
+                atr_val = atr(highs, lows, closes, period=14)
+                if adx_val:
+                    indicators["adx"] = adx_val["adx"]
+                if atr_val:
+                    indicators["atr"] = atr_val
+                indicators["session_multiplier"] = session_quality(symbol)["multiplier"]
             signal = _build_signal(symbol, name, direction, "5min", confidence, prices[-1], " | ".join(reasons), extras={"indicators": indicators})
             if signal:
                 try:
