@@ -214,8 +214,8 @@ def session_quality(symbol):
     new_york = 12 <= hour < 20
     dead = hour >= 20 or hour < 6
     if overlap:
-        return {"quality": "excellent", "multiplier": 1.15,
-                "note": "London + NY overlap — peak accuracy"}
+    return {"quality": "excellent", "multiplier": 1.08,
+            "note": "London + NY overlap — good accuracy"}
     elif london or new_york:
         return {"quality": "good", "multiplier": 1.0,
                 "note": "Active session — good accuracy"}
