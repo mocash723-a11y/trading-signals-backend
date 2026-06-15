@@ -1,5 +1,5 @@
 services:
-  # Main web service (your API)
+  # Main web service
   - type: web
     name: trading-signals-api
     env: python
@@ -10,11 +10,11 @@ services:
       - key: MONGO_URI
         sync: false
 
-  # Cron job for automatic AI training (runs every 12 hours)
+  # Cron job for AI training (runs every 12 hours)
   - type: cron
     name: train-ai-model
     env: python
-    schedule: "0 */12 * * *"   # Runs at minute 0 of every 12th hour (00:00, 12:00 UTC)
+    schedule: "0 */12 * * *"
     buildCommand: pip install -r requirements.txt
     startCommand: python train_model.py
     plan: free
