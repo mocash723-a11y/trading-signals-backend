@@ -40,8 +40,10 @@ async def signal_loop():
 
 @app.get("/")
 def root():
-    return {"status": "Trading Signals API is running", "ml_loaded": ml_model is not None}
-
+    
+    ml_loaded = ml_model_buy is not None or ml_model_sell is not None
+    return {"status": "Trading Signals API is running", "ml_loaded": ml_loaded}
+    
 @app.get("/health")
 def health():
     return {"status": "ok", "prices": get_latest_ticks()}
