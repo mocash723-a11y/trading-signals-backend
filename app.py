@@ -7,8 +7,8 @@ import asyncio
 import os
 from feed import start_feed, get_latest_ticks, get_asset_groups
 from signals import (
-    generate_signals, get_all_signals,
-    get_signal_for, get_recommendations, ml_model
+    generate_signals, get_all_signals, get_signal_for, get_recommendations,
+    ml_model_buy, ml_model_sell  
 )
 from feedback import record_outcome, get_stats, get_pair_accuracy, update_signal_outcome, load_adaptive_thresholds_from_mongo
 
