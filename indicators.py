@@ -21,7 +21,7 @@ def ema_series(prices, period):
     return result
 
 def rsi(prices, period=14):
-    """FIX #8: Use Wilder's smoothing (RMA) like TradingView."""
+    """Use Wilder's smoothing (RMA) like TradingView."""
     if len(prices) < period + 1:
         return None
     recent = prices[-(period + 1):]
@@ -31,7 +31,6 @@ def rsi(prices, period=14):
         gains.append(max(change, 0))
         losses.append(max(-change, 0))
     
-    # Wilder's smoothing: first avg is simple, then smoothed
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
     
@@ -93,8 +92,8 @@ def bollinger_bands(prices, period=20, std_dev=2.0):
     }
 
 def stochastic(prices, period=14):
-    """FIX #7: Add %D line (3-period SMA of %K)."""
-    if len(prices) < period + 3:  # Need extra for %D calculation
+    """Add %D line (3-period SMA of %K)."""
+    if len(prices) < period + 3:
         return None
     recent = prices[-period:]
     highest, lowest = max(recent), min(recent)
@@ -103,7 +102,6 @@ def stochastic(prices, period=14):
     k_raw = ((prices[-1] - lowest) / (highest - lowest)) * 100
     k = round(k_raw, 2)
     
-    # Calculate %D (3-period SMA of %K)
     k_values = []
     for i in range(3):
         window = prices[-(period + i):-i] if i > 0 else prices[-period:]
@@ -119,8 +117,8 @@ def stochastic(prices, period=14):
     return {
         "k": k,
         "d": d,
-        "overbought": k > 80 and d > 80,  # Both must confirm
-        "oversold": k < 20 and d < 20     # Both must confirm
+        "overbought": k > 80 and d > 80,
+        "oversold": k < 20 and d < 20
     }
 
 def tick_momentum(prices, lookback=10):
@@ -148,19 +146,16 @@ def tick_momentum(prices, lookback=10):
 
 def multi_timeframe_confirm(symbol, direction):
     """
-    FIX #6: Use actual different timeframes, not just sliced RSI.
-    Gets real 1min, 3min, 5min data from the candle builders.
+    Use actual 1min, 3min, 5min data from the candle builders.
     """
     from feed import get_closed_candles
     
     confirmations = 0
     agreement_count = 0
     
-    # Get actual timeframe candles
     candles_1m = get_closed_candles(symbol)
     
     if candles_1m and len(candles_1m) >= 10:
-        # 1-minute timeframe analysis
         closes_1m = [c["close"] for c in candles_1m[-10:]]
         rsi_1m = rsi(closes_1m, period=7)
         if rsi_1m:
@@ -171,11 +166,10 @@ def multi_timeframe_confirm(symbol, direction):
                 confirmations += 1
                 agreement_count += 1
         
-        # 3-minute timeframe (use every 3rd candle or aggregate)
         if len(candles_1m) >= 30:
             closes_3m = [c["close"] for c in candles_1m[-30:] if c]
             if len(closes_3m) >= 10:
-                rsi_3m = rsi(closes_3m[::3], period=7)  # Sample every 3rd candle
+                rsi_3m = rsi(closes_3m[::3], period=7)
                 if rsi_3m:
                     if direction == "BUY" and rsi_3m < 52:
                         confirmations += 1
@@ -184,11 +178,10 @@ def multi_timeframe_confirm(symbol, direction):
                         confirmations += 1
                         agreement_count += 1
         
-        # 5-minute timeframe
         if len(candles_1m) >= 50:
             closes_5m = [c["close"] for c in candles_1m[-50:] if c]
             if len(closes_5m) >= 10:
-                rsi_5m = rsi(closes_5m[::5], period=10)  # Sample every 5th candle
+                rsi_5m = rsi(closes_5m[::5], period=10)
                 if rsi_5m:
                     if direction == "BUY" and rsi_5m < 55:
                         confirmations += 1
@@ -197,8 +190,7 @@ def multi_timeframe_confirm(symbol, direction):
                         confirmations += 1
                         agreement_count += 1
     
-    
-bonus = {0: 0, 1: 0, 2: 8, 3: 8}   
+    bonus = {0: 0, 1: 0, 2: 8, 3: 8}.get(confirmations, 0)
     return {
         "confirmed": confirmations >= 2,
         "bonus": bonus,
@@ -214,8 +206,8 @@ def session_quality(symbol):
     new_york = 12 <= hour < 20
     dead = hour >= 20 or hour < 6
     if overlap:
-    return {"quality": "excellent", "multiplier": 1.08,
-            "note": "London + NY overlap — good accuracy"}
+        return {"quality": "excellent", "multiplier": 1.08,
+                "note": "London + NY overlap — peak accuracy"}
     elif london or new_york:
         return {"quality": "good", "multiplier": 1.0,
                 "note": "Active session — good accuracy"}
@@ -296,25 +288,25 @@ def detect_candle_patterns_from_ohlc(candles):
 
     if body_ratio < 0.35:
         if lower_wick >= 2 * upper_wick and lower_wick > 0:
-            return {"pattern": "Bullish Pin Bar", "bias": "BUY", "bonus": 8}
+            return {"pattern": "Bullish Pin Bar", "bias": "BUY", "bonus": 4}
         if upper_wick >= 2 * lower_wick and upper_wick > 0:
-            return {"pattern": "Bearish Pin Bar", "bias": "SELL", "bonus": 8}
+            return {"pattern": "Bearish Pin Bar", "bias": "SELL", "bonus": 4}
 
     if prev:
         prev_body = abs(prev["close"] - prev["open"])
         if body > prev_body * 1.2:
             if curr["close"] > curr["open"] and prev["close"] < prev["open"]:
-                return {"pattern": "Bullish Engulfing", "bias": "BUY", "bonus": 10}
+                return {"pattern": "Bullish Engulfing", "bias": "BUY", "bonus": 5}
             if curr["close"] < curr["open"] and prev["close"] > prev["open"]:
-                return {"pattern": "Bearish Engulfing", "bias": "SELL", "bonus": 10}
+                return {"pattern": "Bearish Engulfing", "bias": "SELL", "bonus": 5}
 
     if body_ratio < 0.05:
-        return {"pattern": "Doji", "bias": "neutral", "bonus": 2}
+        return {"pattern": "Doji", "bias": "neutral", "bonus": 1}
 
     if lower_wick >= 2 * body and upper_wick <= body * 0.5:
-        return {"pattern": "Hammer", "bias": "BUY", "bonus": 6}
+        return {"pattern": "Hammer", "bias": "BUY", "bonus": 3}
     if upper_wick >= 2 * body and lower_wick <= body * 0.5:
-        return {"pattern": "Shooting Star", "bias": "SELL", "bonus": 6}
+        return {"pattern": "Shooting Star", "bias": "SELL", "bonus": 3}
 
     return {"pattern": "none", "bias": "neutral", "bonus": 0}
 
