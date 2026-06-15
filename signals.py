@@ -113,13 +113,20 @@ def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles
     
     # ADX penalty for low-trend markets
     if not symbol.startswith("cry") and candles_1m and len(candles_1m) >= 15:
-        highs = [c["high"] for c in candles_1m[-15:]]
-        lows = [c["low"] for c in candles_1m[-15:]]
-        closes = [c["close"] for c in candles_1m[-15:]]
-        adx_val = adx(highs, lows, closes, period=14)
-        if adx_val and adx_val["adx"] < 20:
+    highs = [c["high"] for c in candles_1m[-15:]]
+    lows = [c["low"] for c in candles_1m[-15:]]
+    closes = [c["close"] for c in candles_1m[-15:]]
+    adx_val = adx(highs, lows, closes, period=14)
+    if adx_val:
+        adx_value = adx_val["adx"]
+        if adx_value < 20:
             confidence *= 0.85
             reasons.append("Low ADX — ranging market (confidence reduced)")
+            print(f"📉 ADX Log [{symbol}]: {adx_value:.2f} → LOW trend (penalty applied)")
+        else:
+            print(f"📈 ADX Log [{symbol}]: {adx_value:.2f} → GOOD trend (no penalty)")
+    else:
+        print(f"⚠️ ADX Log [{symbol}]: ADX calculation returned None")
 
     # Final cap at 100%
     confidence = min(confidence, 100.0)
