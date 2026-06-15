@@ -85,31 +85,46 @@ def _build_signal(symbol, name, direction, timeframe, confidence, entry_price, r
 
 def _apply_boosters(symbol, prices, direction, base_confidence, reasons, candles_1m=None):
     confidence = float(base_confidence)
+    
+    # Session multiplier (applied FIRST to base confidence)
+    session = session_quality(symbol)
+    confidence *= session["multiplier"]
+    if session["quality"] == "excellent":
+        reasons.append("Peak session")
+    elif session["quality"] == "good":
+        reasons.append("Active session")
+    elif session["quality"] == "poor":
+        reasons.append("Low liquidity")
+    
+    # Multi-timeframe bonus (now smaller)
     mtf = multi_timeframe_confirm(symbol, direction)
     if mtf["confirmed"]:
-        confidence += mtf["bonus"]
+        confidence += mtf["bonus"]   # bonus is now max +8 instead of +20
         reasons.append(f"Multi-TF confirmed ({mtf['agreement']} agree)")
+    
+    # Candle pattern bonus (reduced)
     if candles_1m and len(candles_1m) >= 2:
         candle = detect_candle_patterns_from_ohlc(candles_1m)
     else:
         candle = detect_candle_patterns(prices)
     if candle and candle["bias"] == direction and candle["bonus"] > 0:
-        confidence += candle["bonus"]
+        # Reduce candle bonus by half (original was 6-10, now 3-5)
+        bonus = candle["bonus"] // 2
+        confidence += bonus
         reasons.append(f"{candle['pattern']} detected")
-    session = session_quality(symbol)
-    confidence *= session["multiplier"]
-    if session["quality"] == "excellent":
-        reasons.append("Peak session")
-    elif session["quality"] == "poor":
-        reasons.append("Low liquidity")
+    
+    # ADX penalty (unchanged)
     if not symbol.startswith("cry") and candles_1m and len(candles_1m) >= 15:
         highs = [c["high"] for c in candles_1m[-15:]]
         lows = [c["low"] for c in candles_1m[-15:]]
         closes = [c["close"] for c in candles_1m[-15:]]
         adx_val = adx(highs, lows, closes, period=14)
         if adx_val and adx_val["adx"] < 20:
-            confidence *= 0.75   # stronger penalty for ranging market
-            reasons.append("Low ADX — ranging market (confidence cut)")
+            confidence *= 0.9
+            reasons.append("Low ADX — ranging market")
+    
+    # Final cap at 100%
+    confidence = min(confidence, 100.0)
     return confidence
 
 def _session_allows_signal(symbol):
