@@ -217,7 +217,6 @@ def signal_5s(symbol, name, prices):
         "bb_percent_b": bollinger_bands(prices, 20, 2.0)["percent_b"] if bollinger_bands(prices, 20, 2.0) else 0.5,
         "direction_encoded": 1 if direction == "BUY" else 0
     }
-    # Add ADX/ATR/session if candles available
     if candles and len(candles) >= 15:
         highs = [c["high"] for c in candles[-15:]]
         lows = [c["low"] for c in candles[-15:]]
@@ -296,8 +295,7 @@ def signal_1min(symbol, name, prices):
             print(f"Failed to save pending signal for {symbol} 1min: {e}")
     return signal
 
-# ------------------------- 3min signal -------------------------
-def signal_3min(symbol, name, prices):
+# ------------------------- 3min signal (UPDATED) -------------------------
 def signal_3min(symbol, name, prices):
     if _is_signal_fresh(symbol, "3min"):
         return current_signals.get(f"{symbol}_3min")
@@ -362,7 +360,6 @@ def signal_3min(symbol, name, prices):
             bull += 1
             reasons.append("Price near lower BB")
     else:
-        # If trend condition fails, no BUY signal
         bull = 0
     
     # --- SELL CONDITION ---
@@ -380,12 +377,11 @@ def signal_3min(symbol, name, prices):
     else:
         bear = 0
     
-    # If no clear setup, exit
     if bull == 0 and bear == 0:
         return None
     
     for direction, score in [("BUY", bull), ("SELL", bear)]:
-        if score >= 2:   # require at least trend + MACD confirmation
+        if score >= 2:
             base = 63 + score * 7
             ml_conf = ml_confidence(symbol, "3min", direction, prices)
             base = ml_conf if ml_conf else base
@@ -411,7 +407,7 @@ def signal_3min(symbol, name, prices):
             return signal
     return None
 
-# ------------------------- 5min signal -------------------------
+# ------------------------- 5min signal (UPDATED) -------------------------
 def signal_5min(symbol, name, prices):
     if _is_signal_fresh(symbol, "5min"):
         return current_signals.get(f"{symbol}_5min")
@@ -621,4 +617,4 @@ def _explain(sig, session):
         f"Valid for {validity} seconds — act quickly. "
         f"Market: {session['note']}. "
         f"Indicators: {sig['reason']}."
-        )
+    )
