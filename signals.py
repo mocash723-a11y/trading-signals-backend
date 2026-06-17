@@ -425,33 +425,64 @@ def signal_5min(symbol, name, prices):
     bb = bollinger_bands(sample, period=20, std_dev=2.0)
     if not all([rsi_val, macd_val, bb]):
         return None
+    
+    # --- NEW FILTERS ---
+    candles_1m = get_closed_candles(symbol)
+    if not candles_1m or len(candles_1m) < 30:
+        return None
+    
+    highs = [c["high"] for c in candles_1m[-30:]]
+    lows = [c["low"] for c in candles_1m[-30:]]
+    closes = [c["close"] for c in candles_1m[-30:]]
+    adx_val = adx(highs, lows, closes, period=14)
+    if not adx_val:
+        return None
+    adx = adx_val["adx"]
+    
+    ema20 = ema(closes, 20)
+    if not ema20:
+        return None
+    price = prices[-1]
+    
+    macd_bullish = macd_val["histogram"] > 0
+    macd_cross_bullish = macd_val["cross"] == "bullish"
+    macd_bearish = macd_val["histogram"] < 0
+    macd_cross_bearish = macd_val["cross"] == "bearish"
+    bb_pct = bb["percent_b"]
+    
     bull, bear, reasons = 0, 0, []
-    if rsi_val < 35:
-        bull += 1
-        reasons.append(f"RSI oversold ({rsi_val})")
-    elif rsi_val > 65:
-        bear += 1
-        reasons.append(f"RSI overbought ({rsi_val})")
-    if bb["percent_b"] < 0.25:
-        bull += 1
-        reasons.append("Price near lower BB")
-    elif bb["percent_b"] > 0.75:
-        bear += 1
-        reasons.append("Price near upper BB")
-    if macd_val["cross"] == "bullish":
-        bull += 2
-        reasons.append("MACD bullish cross")
-    elif macd_val["histogram"] > 0:
-        bull += 1
-        reasons.append("MACD positive")
-    elif macd_val["cross"] == "bearish":
-        bear += 2
-        reasons.append("MACD bearish cross")
-    elif macd_val["histogram"] < 0:
-        bear += 1
-        reasons.append("MACD negative")
+    
+    if price > ema20 and adx > 25:
+        if macd_bullish or macd_cross_bullish:
+            bull += 2
+            reasons.append("BUY: trend + MACD bullish")
+        if rsi_val < 35:
+            bull += 1
+            reasons.append(f"RSI oversold ({rsi_val})")
+        if bb_pct < 0.4:
+            bull += 1
+            reasons.append("Price near lower BB")
+    else:
+        bull = 0
+    
+    if price < ema20 and adx > 20:
+        if macd_bearish or macd_cross_bearish:
+            bear += 2
+            reasons.append("SELL: trend + MACD bearish")
+        if rsi_val > 65:
+            bear += 1
+            reasons.append(f"RSI overbought ({rsi_val})")
+        if bb_pct > 0.6:
+            bear += 1
+            reasons.append("Price near upper BB")
+    else:
+        bear = 0
+    
+    if bull == 0 and bear == 0:
+        return None
+    
     for direction, score in [("BUY", bull), ("SELL", bear)]:
-        if score >= 3:
+        if score >= 2:
             base = 68 + min(score * 5, 18)
             ml_conf = ml_confidence(symbol, "5min", direction, prices)
             base = ml_conf if ml_conf else base
@@ -462,20 +493,12 @@ def signal_5min(symbol, name, prices):
                 "rsi14": rsi_val,
                 "macd_line": macd_val["macd_line"],
                 "stoch_k": stochastic(sample, 14)["k"] if stochastic(sample, 14) else 50,
-                "bb_percent_b": bb["percent_b"],
-                "direction_encoded": 1 if direction == "BUY" else 0
+                "bb_percent_b": bb_pct,
+                "direction_encoded": 1 if direction == "BUY" else 0,
+                "adx": adx,
+                "atr": atr(highs, lows, closes, period=14) or 0.001,
+                "session_multiplier": session_quality(symbol)["multiplier"]
             }
-            if candles and len(candles) >= 15:
-                highs = [c["high"] for c in candles[-15:]]
-                lows = [c["low"] for c in candles[-15:]]
-                closes = [c["close"] for c in candles[-15:]]
-                adx_val = adx(highs, lows, closes, period=14)
-                atr_val = atr(highs, lows, closes, period=14)
-                if adx_val:
-                    indicators["adx"] = adx_val["adx"]
-                if atr_val:
-                    indicators["atr"] = atr_val
-                indicators["session_multiplier"] = session_quality(symbol)["multiplier"]
             signal = _build_signal(symbol, name, direction, "5min", confidence, prices[-1], " | ".join(reasons), extras={"indicators": indicators})
             if signal:
                 try:
