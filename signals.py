@@ -298,6 +298,7 @@ def signal_1min(symbol, name, prices):
 
 # ------------------------- 3min signal -------------------------
 def signal_3min(symbol, name, prices):
+def signal_3min(symbol, name, prices):
     if _is_signal_fresh(symbol, "3min"):
         return current_signals.get(f"{symbol}_3min")
     if symbol == "cryBTCUSD":
@@ -312,31 +313,79 @@ def signal_3min(symbol, name, prices):
     stoch = stochastic(sample, period=14)
     if not all([rsi_val, macd_val, stoch]):
         return None
+    
+    # --- NEW FILTERS ---
+    # 1. Get candles for ADX and EMA
+    candles_1m = get_closed_candles(symbol)
+    if not candles_1m or len(candles_1m) < 20:
+        return None  # not enough data for reliable filters
+    
+    highs = [c["high"] for c in candles_1m[-20:]]
+    lows = [c["low"] for c in candles_1m[-20:]]
+    closes = [c["close"] for c in candles_1m[-20:]]
+    adx_val = adx(highs, lows, closes, period=14)
+    if not adx_val:
+        return None
+    adx = adx_val["adx"]
+    
+    # 2. Price vs 20-period EMA (using 1m candles)
+    ema20 = ema(closes, 20)
+    if not ema20:
+        return None
+    price = prices[-1]  # current price from tick data
+    
+    # 3. MACD direction
+    macd_bullish = macd_val["histogram"] > 0
+    macd_cross_bullish = macd_val["cross"] == "bullish"
+    macd_bearish = macd_val["histogram"] < 0
+    macd_cross_bearish = macd_val["cross"] == "bearish"
+    
+    # 4. BB% (optional)
+    bb = bollinger_bands(sample, 20, 2.0)
+    bb_pct = bb["percent_b"] if bb else 0.5
+    
     bull, bear, reasons = 0, 0, []
-    if rsi_val < 35:
-        bull += 1
-        reasons.append(f"RSI oversold ({rsi_val})")
-    elif rsi_val > 65:
-        bear += 1
-        reasons.append(f"RSI overbought ({rsi_val})")
-    if macd_val["cross"] == "bullish":
-        bull += 1
-        reasons.append("MACD bullish cross")
-    elif macd_val["cross"] == "bearish":
-        bear += 1
-        reasons.append("MACD bearish cross")
-    elif macd_val["histogram"] > 0:
-        bull += 1
-    elif macd_val["histogram"] < 0:
-        bear += 1
-    if stoch["oversold"]:
-        bull += 1
-        reasons.append("Stochastic oversold")
-    elif stoch["overbought"]:
-        bear += 1
-        reasons.append("Stochastic overbought")
+    
+    # --- BUY CONDITION ---
+    # Trend: price > EMA20 AND ADX > 25
+    if price > ema20 and adx > 25:
+        # MACD confirmation: histogram > 0 OR bullish cross
+        if macd_bullish or macd_cross_bullish:
+            bull += 2
+            reasons.append("BUY setup: trend + MACD bullish")
+        # RSI oversold (optional bonus)
+        if rsi_val < 35:
+            bull += 1
+            reasons.append(f"RSI oversold ({rsi_val})")
+        # BB% lower (optional bonus)
+        if bb_pct < 0.4:
+            bull += 1
+            reasons.append("Price near lower BB")
+    else:
+        # If trend condition fails, no BUY signal
+        bull = 0
+    
+    # --- SELL CONDITION ---
+    # Trend: price < EMA20 AND ADX > 20
+    if price < ema20 and adx > 20:
+        if macd_bearish or macd_cross_bearish:
+            bear += 2
+            reasons.append("SELL setup: trend + MACD bearish")
+        if rsi_val > 65:
+            bear += 1
+            reasons.append(f"RSI overbought ({rsi_val})")
+        if bb_pct > 0.6:
+            bear += 1
+            reasons.append("Price near upper BB")
+    else:
+        bear = 0
+    
+    # If no clear setup, exit
+    if bull == 0 and bear == 0:
+        return None
+    
     for direction, score in [("BUY", bull), ("SELL", bear)]:
-        if score >= 2:
+        if score >= 2:   # require at least trend + MACD confirmation
             base = 63 + score * 7
             ml_conf = ml_confidence(symbol, "3min", direction, prices)
             base = ml_conf if ml_conf else base
@@ -347,20 +396,12 @@ def signal_3min(symbol, name, prices):
                 "rsi14": rsi_val,
                 "macd_line": macd_val["macd_line"],
                 "stoch_k": stoch["k"],
-                "bb_percent_b": bollinger_bands(sample, 20, 2.0)["percent_b"] if bollinger_bands(sample, 20, 2.0) else 0.5,
-                "direction_encoded": 1 if direction == "BUY" else 0
+                "bb_percent_b": bb_pct,
+                "direction_encoded": 1 if direction == "BUY" else 0,
+                "adx": adx,
+                "atr": atr(highs, lows, closes, period=14) or 0.001,
+                "session_multiplier": session_quality(symbol)["multiplier"]
             }
-            if candles and len(candles) >= 15:
-                highs = [c["high"] for c in candles[-15:]]
-                lows = [c["low"] for c in candles[-15:]]
-                closes = [c["close"] for c in candles[-15:]]
-                adx_val = adx(highs, lows, closes, period=14)
-                atr_val = atr(highs, lows, closes, period=14)
-                if adx_val:
-                    indicators["adx"] = adx_val["adx"]
-                if atr_val:
-                    indicators["atr"] = atr_val
-                indicators["session_multiplier"] = session_quality(symbol)["multiplier"]
             signal = _build_signal(symbol, name, direction, "3min", confidence, prices[-1], " | ".join(reasons), extras={"indicators": indicators})
             if signal:
                 try:
