@@ -345,8 +345,8 @@ def signal_3min(symbol, name, prices):
     bull, bear, reasons = 0, 0, []
     
     # --- BUY CONDITION ---
-    # Trend: price > EMA20 AND ADX > 25
-    if price > ema20 and adx > 25:
+    # Trend: price > EMA20 AND ADX > 22
+    if price > ema20 and adx > 22:
         # MACD confirmation: histogram > 0 OR bullish cross
         if macd_bullish or macd_cross_bullish:
             bull += 2
@@ -363,8 +363,8 @@ def signal_3min(symbol, name, prices):
         bull = 0
     
     # --- SELL CONDITION ---
-    # Trend: price < EMA20 AND ADX > 20
-    if price < ema20 and adx > 20:
+    # Trend: price < EMA20 AND ADX > 18
+    if price < ema20 and adx > 18:
         if macd_bearish or macd_cross_bearish:
             bear += 2
             reasons.append("SELL setup: trend + MACD bearish")
